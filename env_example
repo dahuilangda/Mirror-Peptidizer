@@ -1,0 +1,2 @@
+CHROMA_KEY = 'your chroma key'
+ProteinMPNN_CHECKPOINT = 'ProteinMPNN/soluble_model_weights/v_48_020.pt'
