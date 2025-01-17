@@ -263,14 +263,22 @@ def protein_mpnn(input_pdb, batch_size=1, design_chain='B', temperature=0.3, sco
                         native_score_print = np.format_float_positional(
                             np.float32(native_score.mean()), unique=False, precision=4
                         )
+                        # print(
+                        #     '>{}, score={}, fixed_chains={}, designed_chains={}, model_name={}\n{}\n'.format(
+                        #         name_,
+                        #         native_score_print,
+                        #         print_visible_chains,
+                        #         print_masked_chains,
+                        #         'v_48_020',
+                        #         native_seq
+                        #     )
+                        # )  # Write the native sequence
+
                         print(
-                            '>{}, score={}, fixed_chains={}, designed_chains={}, model_name={}\n{}\n'.format(
+                            '>{}, fixed_chains={}, designed_chains={}'.format(
                                 name_,
-                                native_score_print,
                                 print_visible_chains,
-                                print_masked_chains,
-                                'v_48_020',
-                                native_seq
+                                print_masked_chains
                             )
                         )  # Write the native sequence
 

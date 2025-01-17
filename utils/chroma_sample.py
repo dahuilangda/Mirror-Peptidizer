@@ -11,7 +11,7 @@ def generate_mask(S, L_receptor, L_complex, device):
     mask_aa[0, :L_receptor, :] = allowed_aas
     return mask_aa
 
-def create_conditioner(protein, chroma, device):
+def create_conditioner(protein, chroma, weight=3.0, device='cuda:0'):
     """
     Create a composed conditioner for protein sampling.
     """
@@ -19,12 +19,13 @@ def create_conditioner(protein, chroma, device):
     conditioner_struc_R = conditioners.SubstructureConditioner(
         protein,
         backbone_model=chroma.backbone_network,
-        selection='namesel receptor'
+        selection='namesel receptor',
+        weight=weight,
     ).to(device)
 
     return conditioners.ComposedConditioner([conditioner_struc_R])
 
-def binder_sample(input_pdb, len_binder, output_pdb, len_chains, device='cuda:0', langevin_factor=2, sde_func='langevin'):
+def binder_sample(input_pdb, len_binder, output_pdb, len_chains, device='cuda:0', weight=1.0, langevin_factor=2, sde_func='langevin'):
     """
     Generate binder for a given receptor structure.
     """
@@ -57,7 +58,7 @@ def binder_sample(input_pdb, len_binder, output_pdb, len_chains, device='cuda:0'
     protein.sys.save_selection(gti=residues_to_keep, selname="receptor")
 
     # Create conditioner
-    conditioner = create_conditioner(protein, chroma, device)
+    conditioner = create_conditioner(protein, chroma, weight, device)
 
     # Perform sampling to generate binder
     protein = chroma.sample(
