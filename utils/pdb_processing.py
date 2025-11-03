@@ -80,7 +80,8 @@ def get_pdb_chains(pdb_file_path):
                 chain_id = line[21].strip()
                 if chain_id:
                     chains.add(chain_id)
-    return list(chains)
+    #return list(chains)
+    return sorted(list(chains))
 
 def _remove_hydrogens(input_pdb, output_pdb):
     with open(input_pdb, 'r') as f:

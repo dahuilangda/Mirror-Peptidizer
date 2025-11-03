@@ -59,6 +59,13 @@ This approach leverages stereoisomer-specific modeling and sequence generation f
 - **AI-Driven Binder Generation**: Uses Chroma's diffusion model to create optimized peptide binder structures.
 - **Protein Sequence Prediction**: Predicts sequences tailored for binding using ProteinMPNN, ensuring compatibility with generated binding poses.
 
+## Hardware Requirements
+
+- **GPU**: NVIDIA GPU with CUDA 11+ support and at least 12 GB VRAM (24 GB recommended for larger pose batches).
+- **CPU**: 8+ core CPU (Intel Xeon/i7 or AMD Ryzen/EPYC class) for preprocessing and data handling.
+- **Memory**: Minimum 8 GB system RAM to accommodate intermediate tensor data and PDB processing.
+- **Storage**: ~20 GB free disk space for checkpoints, temporary outputs, and generated poses.
+
 ## Table of Contents
 
 - [Installation](#installation)
