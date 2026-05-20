@@ -1,2 +1,5 @@
 CHROMA_KEY = 'your chroma key'
-ProteinMPNN_CHECKPOINT = 'ProteinMPNN/soluble_model_weights/v_48_020.pt'
+CHROMA_WEIGHTS_DIR = 'chroma_weights'
+ProteinMPNN_CHECKPOINT = 'ProteinMPNN/vanilla_model_weights/v_48_020.pt'
+BOLTZ2EMBEDDING_URL = 'http://your-boltz2-server:8000'
+BOLTZ2EMBEDDING_TOKEN = 'your-api-token'

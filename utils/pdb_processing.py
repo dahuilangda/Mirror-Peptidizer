@@ -1,8 +1,8 @@
 from Bio.PDB import PDBParser, PDBIO
 from pdbfixer import PDBFixer
 from openmm.app import PDBFile, Simulation, ForceField, NoCutoff, HBonds
-from openmm import LangevinIntegrator, CustomExternalForce, Vec3
-from openmm.unit import kelvin, picosecond, picoseconds
+from openmm import LangevinIntegrator, Vec3
+from openmm.unit import dalton, kelvin, nanometer, picosecond, picoseconds
 
 def ld_convert(input_pdb, output_pdb):
     parser = PDBParser()
@@ -30,7 +30,33 @@ def one_to_three(seq):
     }
     return [aa_dict.get(residue, 'UNK') for residue in seq]
 
-def seq_to_pdb(seq, pdb, output_pdb, design_chain='B', minimize=True, remove_hydrogens=True):
+BACKBONE_ATOMS = {"N", "CA", "C", "O"}
+
+
+def _atom_key(atom):
+    residue = atom.residue
+    chain = residue.chain
+    insertion_code = getattr(residue, 'insertionCode', '')
+    return (chain.id, residue.id, insertion_code, atom.name)
+
+
+def _positions_as_vec3_list(positions):
+    return [
+        pos.value_in_unit(nanometer) if hasattr(pos, 'value_in_unit') else pos
+        for pos in positions
+    ]
+
+
+def _backbone_positions_from_pdb(pdb_file):
+    pdb = PDBFile(pdb_file)
+    return {
+        _atom_key(atom): pos.value_in_unit(nanometer)
+        for atom, pos in zip(pdb.topology.atoms(), pdb.positions)
+        if atom.name in BACKBONE_ATOMS
+    }
+
+
+def seq_to_pdb(seq, pdb, output_pdb, design_chain='B', minimize=True, remove_hydrogens=True, fix_backbone=True):
     aa_list = one_to_three(seq)
     new_line = []
     chain_residue_num = None
@@ -70,7 +96,13 @@ def seq_to_pdb(seq, pdb, output_pdb, design_chain='B', minimize=True, remove_hyd
     with open(output_pdb, 'w') as f:
         f.writelines(new_line)
 
-    fix_pdb(output_pdb, output_pdb, minimize=minimize, remove_hydrogens=remove_hydrogens)
+    fix_pdb(
+        output_pdb,
+        output_pdb,
+        minimize=minimize,
+        remove_hydrogens=remove_hydrogens,
+        fix_backbone=fix_backbone,
+    )
 
 def get_pdb_chains(pdb_file_path):
     chains = set()
@@ -96,7 +128,21 @@ def _remove_hydrogens(input_pdb, output_pdb):
     with open(output_pdb, 'w') as f:
         f.writelines(new_lines)
 
-def fix_pdb(input_pdb, output_pdb, minimize=True, remove_hydrogens=True, restrain_backbone=True):
+def fix_pdb(
+    input_pdb,
+    output_pdb,
+    minimize=True,
+    remove_hydrogens=True,
+    fix_backbone=True,
+    restrain_backbone=None,
+):
+    if restrain_backbone is not None:
+        fix_backbone = restrain_backbone
+
+    original_backbone_positions = (
+        _backbone_positions_from_pdb(input_pdb) if fix_backbone else {}
+    )
+
     # Load the PDB file
     fixer = PDBFixer(filename=input_pdb)
 
@@ -106,6 +152,17 @@ def fix_pdb(input_pdb, output_pdb, minimize=True, remove_hydrogens=True, restrai
     fixer.addMissingAtoms()
     fixer.addMissingHydrogens()
 
+    backbone_positions = {}
+    if fix_backbone:
+        for atom, pos in zip(fixer.topology.atoms(), fixer.positions):
+            if atom.name in BACKBONE_ATOMS:
+                current_pos = pos.value_in_unit(nanometer)
+                backbone_positions[atom.index] = original_backbone_positions.get(_atom_key(atom), current_pos)
+        fixed_positions = _positions_as_vec3_list(fixer.positions)
+        for atom_index, pos in backbone_positions.items():
+            fixed_positions[atom_index] = pos
+        fixer.positions = fixed_positions * nanometer
+
     if minimize:
         
         # Define the force field
@@ -114,21 +171,14 @@ def fix_pdb(input_pdb, output_pdb, minimize=True, remove_hydrogens=True, restrai
         # Create the OpenMM system
         system = forcefield.createSystem(
             fixer.topology,
-            constraints=HBonds,
+            constraints=None if fix_backbone else HBonds,
             nonbondedMethod=NoCutoff
         )
 
-        if restrain_backbone:
-            restraint = CustomExternalForce("0.5*k*((x-x0)^2 + (y-y0)^2 + (z-z0)^2)")
-            restraint.addPerParticleParameter("k")
-            restraint.addPerParticleParameter("x0")
-            restraint.addPerParticleParameter("y0")
-            restraint.addPerParticleParameter("z0")
-
-            # 对主链原子施加强约束
-            for atom, pos in zip(fixer.topology.atoms(), fixer.positions):
-                if atom.name in ["N", "CA", "C", "O"]:
-                    restraint.addParticle(atom.index, [1000.0, pos.x, pos.y, pos.z])
+        if fix_backbone:
+            for atom in fixer.topology.atoms():
+                if atom.index in backbone_positions:
+                    system.setParticleMass(atom.index, 0.0 * dalton)
 
         # Create an integrator
         integrator = LangevinIntegrator(
@@ -147,13 +197,19 @@ def fix_pdb(input_pdb, output_pdb, minimize=True, remove_hydrogens=True, restrai
         simulation.minimizeEnergy(maxIterations=1000)
 
         # Get the minimized positions
-        positions = simulation.context.getState(getPositions=True).getPositions()
+        positions = _positions_as_vec3_list(
+            simulation.context.getState(getPositions=True).getPositions()
+        )
     else:
-        positions = fixer.positions
+        positions = _positions_as_vec3_list(fixer.positions)
+
+    if fix_backbone:
+        for atom_index, pos in backbone_positions.items():
+            positions[atom_index] = pos
 
     # Save the (optionally minimized) structure
     with open(output_pdb, 'w') as f:
-        PDBFile.writeFile(fixer.topology, positions, f)
+        PDBFile.writeFile(fixer.topology, positions * nanometer, f)
 
     if remove_hydrogens:
         _remove_hydrogens(output_pdb, output_pdb)

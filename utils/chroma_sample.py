@@ -1,6 +1,33 @@
+import os
 import torch
 from chroma import Chroma, Protein, conditioners
 from .pdb_processing import fix_pdb
+
+
+def _get_chroma_weights():
+    """Resolve Chroma weight paths from .env or local chroma_weights/ directory."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    backbone = os.getenv('CHROMA_WEIGHTS_BACKBONE')
+    design = os.getenv('CHROMA_WEIGHTS_DESIGN')
+    if backbone and design:
+        return backbone, design
+
+    weights_dir = os.getenv('CHROMA_WEIGHTS_DIR',
+                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'chroma_weights'))
+    backbone_path = None
+    design_path = None
+    if os.path.isdir(weights_dir):
+        for subdir in os.listdir(weights_dir):
+            full = os.path.join(weights_dir, subdir, 'weights.pt')
+            if os.path.isfile(full):
+                if os.path.getsize(full) > 60_000_000:
+                    backbone_path = full
+                else:
+                    design_path = full
+    return backbone_path, design_path
+
 
 def generate_mask(S, L_receptor, L_complex, device):
     """
@@ -25,11 +52,34 @@ def create_conditioner(protein, chroma, weight=3.0, device='cuda:0'):
 
     return conditioners.ComposedConditioner([conditioner_struc_R])
 
+CHROMA_WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'chroma_weights')
+
+
+def _get_local_weights():
+    """Resolve local Chroma weight paths from chroma_weights/ directory."""
+    backbone_path = None
+    design_path = None
+    for subdir in os.listdir(CHROMA_WEIGHTS_DIR):
+        full = os.path.join(CHROMA_WEIGHTS_DIR, subdir, 'weights.pt')
+        if os.path.isfile(full):
+            size = os.path.getsize(full)
+            # backbone ~74MB, design ~55MB
+            if size > 60_000_000:
+                backbone_path = full
+            else:
+                design_path = full
+    return backbone_path, design_path
+
+
 def binder_sample(input_pdb, len_binder, output_pdb, len_chains, device='cuda:0', weight=1.0, langevin_factor=2, sde_func='langevin'):
     """
     Generate binder for a given receptor structure.
     """
-    chroma = Chroma()
+    backbone_w, design_w = _get_chroma_weights()
+    if backbone_w and design_w:
+        chroma = Chroma(weights_backbone=backbone_w, weights_design=design_w, device=str(device))
+    else:
+        chroma = Chroma(device=str(device))
     protein = Protein(input_pdb, device=device)
 
     # Convert protein to X, C, S representation

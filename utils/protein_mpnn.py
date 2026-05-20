@@ -11,6 +11,21 @@ from ProteinMPNN.vanilla_proteinmpnn import protein_mpnn_utils as utils
 from dotenv import load_dotenv
 load_dotenv()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEFAULT_PROTEIN_MPNN_CHECKPOINT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "ProteinMPNN",
+    "vanilla_model_weights",
+    "v_48_020.pt",
+)
+_MODEL_CACHE = {}
+
+
+def resolve_checkpoint_path(checkpoint_path=None):
+    """Resolve the ProteinMPNN checkpoint used by wrappers in this module."""
+    resolved = checkpoint_path or os.getenv("ProteinMPNN_CHECKPOINT") or DEFAULT_PROTEIN_MPNN_CHECKPOINT
+    if not os.path.exists(resolved):
+        raise FileNotFoundError(f"ProteinMPNN checkpoint not found: {resolved}")
+    return resolved
 
 def compute_native_score(model, X, S, mask, chain_M, chain_M_pos, residue_idx, chain_encoding_all, score_mode='designed'):
     randn_1 = torch.randn(mask.shape, device=X.device)
@@ -28,13 +43,20 @@ def compute_native_score(model, X, S, mask, chain_M, chain_M_pos, residue_idx, c
     native_score = scores.cpu().data.numpy()
     return native_score
 
-def load_model():
-    checkpoint_path = os.getenv("ProteinMPNN_CHECKPOINT")
+def load_model(checkpoint_path=None, use_cache=True):
+    checkpoint_path = resolve_checkpoint_path(checkpoint_path)
+    cache_key = (checkpoint_path, str(device))
+    if use_cache and cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+
     hidden_dim = 128
     num_layers = 3 
     backbone_noise = 0.00  # Set to zero to disable backbone noise
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)  # Load checkpoint
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
 
     model = utils.ProteinMPNN(
         num_letters=21,
@@ -49,6 +71,8 @@ def load_model():
     model.to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
+    if use_cache:
+        _MODEL_CACHE[cache_key] = model
     return model
 
 def prepare_inputs(input_pdb, design_chain='B'):
@@ -103,8 +127,8 @@ def prepare_inputs(input_pdb, design_chain='B'):
         chain_list_list, visible_list_list, masked_list_list, masked_chain_length_list_list, omit_AA_mask, \
         pssm_coef, pssm_bias, pssm_log_odds_all, bias_by_res_all
 
-def protein_mpnn(input_pdb, batch_size=1, design_chain='B', temperature=0.3, score_mode='designed'):
-    model = load_model()
+def protein_mpnn(input_pdb, batch_size=1, design_chain='B', temperature=0.3, score_mode='designed', checkpoint_path=None):
+    model = load_model(checkpoint_path=checkpoint_path)
     (
         X, S, mask, chain_M, chain_M_pos, residue_idx, chain_encoding_all,
         chain_M_pos, chain_id_dict, batch_clones,
@@ -305,8 +329,8 @@ def protein_mpnn(input_pdb, batch_size=1, design_chain='B', temperature=0.3, sco
         average_design_probs = total_design_probs / num_samples
         return seqs, average_design_probs
 
-def score_complex(input_pdb, design_chain='B', score_mode='designed'):
-    model = load_model()
+def score_complex(input_pdb, design_chain='B', score_mode='designed', checkpoint_path=None):
+    model = load_model(checkpoint_path=checkpoint_path)
     X, S, mask, chain_M, chain_M_pos, residue_idx, chain_encoding_all, *_ = prepare_inputs(input_pdb, design_chain)
     native_score = compute_native_score(
         model,
