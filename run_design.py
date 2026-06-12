@@ -9,6 +9,12 @@ alphabet_list = list(ascii_uppercase+ascii_lowercase)
 
 from utils.pdb_processing import ld_convert, seq_to_pdb, get_pdb_chains
 from utils.chroma_sample import binder_sample
+from utils.pose_filtering import (
+    DEFAULT_SURFACE_FILTER,
+    format_surface_pose_metrics,
+    passes_surface_pose_filter,
+    surface_pose_metrics,
+)
 from utils.protein_mpnn import (
     protein_mpnn,
     plot_amino_acid_probs,
@@ -16,6 +22,31 @@ from utils.protein_mpnn import (
     score_complex,
 )
 from bo.scoring import synthesis_metrics
+
+
+SURFACE_FILTER_COLUMNS = [
+    'surface_filter_pass',
+    'surface_filter_attempts',
+    'radial_percentile',
+    'nearby_receptor_atoms',
+    'outward_nearby_fraction',
+    'occupied_octants',
+    'min_receptor_distance',
+    'median_receptor_distance',
+    'binder_atoms_within_contact',
+]
+
+
+def _surface_filter_cfg(args):
+    return {
+        'radial_min': args.surface_radial_min,
+        'outward_nearby_max': args.surface_outward_nearby_max,
+        'occupied_octants_max': args.surface_occupied_octants_max,
+        'min_binder_atoms_within_contact': args.surface_min_contact_atoms,
+        'nearby_distance': args.surface_nearby_distance,
+        'contact_distance': args.surface_contact_distance,
+        'max_attempts': args.surface_max_attempts,
+    }
 
 
 def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg):
@@ -317,7 +348,19 @@ def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg)
     return df_fitness
 
 
-def main(receptor_pdb, output_path, len_binder, temperature, num_poses, num_seqs_per_pose, bo_cfg=None, result_file='results.csv', mpnn_checkpoint=None):
+def main(
+    receptor_pdb,
+    output_path,
+    len_binder,
+    temperature,
+    num_poses,
+    num_seqs_per_pose,
+    bo_cfg=None,
+    result_file='results.csv',
+    mpnn_checkpoint=None,
+    filter_surface_poses=False,
+    surface_filter_cfg=None,
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if not os.path.exists(output_path):
@@ -329,6 +372,18 @@ def main(receptor_pdb, output_path, len_binder, temperature, num_poses, num_seqs
 
     receptor_chains = get_pdb_chains(receptor_pdb)
     design_chain = alphabet_list[len(receptor_chains)]
+    surface_filter_cfg = surface_filter_cfg or dict(DEFAULT_SURFACE_FILTER, max_attempts=10)
+    if filter_surface_poses:
+        df = pd.DataFrame(columns=['pose', 'sequence', 'score', 'filename', *SURFACE_FILTER_COLUMNS])
+        print(
+            "Surface pose filter enabled: "
+            f"radial_min={surface_filter_cfg['radial_min']}, "
+            f"outward_nearby_max={surface_filter_cfg['outward_nearby_max']}, "
+            f"occupied_octants_max={surface_filter_cfg['occupied_octants_max']}, "
+            "min_binder_atoms_within_contact="
+            f"{surface_filter_cfg['min_binder_atoms_within_contact']}, "
+            f"max_attempts={surface_filter_cfg['max_attempts']}"
+        )
 
     pose_dir = os.path.join(output_path, f'Poses')
     if not os.path.exists(pose_dir):
@@ -353,8 +408,54 @@ def main(receptor_pdb, output_path, len_binder, temperature, num_poses, num_seqs
         L_binder = os.path.join(pose_dir, f'Binder_L_pose_{i+1}.pdb')
         D_binder = os.path.join(pose_dir, f'Binder_D_pose_{i+1}.pdb')
 
+        pose_filter_metrics = {}
+        pose_filter_attempts = 1
+        pose_filter_pass = True
+
         # 2. Sample binder of L stereoisomer for each pose
-        binder_sample(D_receptor, len_binder, L_binder, len_chains=len(receptor_chains), device=device)
+        if filter_surface_poses:
+            pose_filter_pass = False
+            for attempt in range(1, int(surface_filter_cfg['max_attempts']) + 1):
+                binder_sample(
+                    D_receptor,
+                    len_binder,
+                    L_binder,
+                    len_chains=len(receptor_chains),
+                    device=device,
+                )
+                pose_filter_metrics = surface_pose_metrics(
+                    L_binder,
+                    binder_chain=design_chain,
+                    receptor_chains=receptor_chains,
+                    nearby_distance=surface_filter_cfg['nearby_distance'],
+                    contact_distance=surface_filter_cfg['contact_distance'],
+                )
+                pose_filter_attempts = attempt
+                pose_filter_pass = passes_surface_pose_filter(
+                    pose_filter_metrics,
+                    radial_min=surface_filter_cfg['radial_min'],
+                    outward_nearby_max=surface_filter_cfg['outward_nearby_max'],
+                    occupied_octants_max=surface_filter_cfg['occupied_octants_max'],
+                    min_binder_atoms_within_contact=surface_filter_cfg[
+                        'min_binder_atoms_within_contact'
+                    ],
+                )
+                status = "pass" if pose_filter_pass else "reject"
+                print(
+                    f"Pose {i+1} attempt {attempt}: {status} "
+                    f"({format_surface_pose_metrics(pose_filter_metrics)})"
+                )
+                if pose_filter_pass:
+                    break
+
+            if not pose_filter_pass:
+                raise RuntimeError(
+                    f"Failed to generate a surface-like pose for pose {i+1} "
+                    f"after {surface_filter_cfg['max_attempts']} attempts. "
+                    "Increase --surface_max_attempts or relax the surface filter thresholds."
+                )
+        else:
+            binder_sample(D_receptor, len_binder, L_binder, len_chains=len(receptor_chains), device=device)
 
         # 3. Run protein mpnn for each pose and generate sequences
         seqs, amino_acid_probs = protein_mpnn(
@@ -385,6 +486,11 @@ def main(receptor_pdb, output_path, len_binder, temperature, num_poses, num_seqs
                 'sequence': seq['sequence'],
                 'score': seq['score'],
                 'filename': D_binder_seq,
+                **({
+                    'surface_filter_pass': pose_filter_pass,
+                    'surface_filter_attempts': pose_filter_attempts,
+                    **pose_filter_metrics,
+                } if filter_surface_poses else {}),
                 **metrics,
             }, ignore_index=True)
 
@@ -435,6 +541,30 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, help='GPU device number', default=0)
     parser.add_argument('--mpnn_checkpoint', type=str, default=None,
                         help='ProteinMPNN checkpoint path. Defaults to env ProteinMPNN_CHECKPOINT or vanilla v_48_020.')
+
+    surface_group = parser.add_argument_group('Surface pose filtering (optional)')
+    surface_group.add_argument('--filter_surface_poses', action='store_true',
+                               help='Reject Chroma poses that are buried inside the receptor before ProteinMPNN.')
+    surface_group.add_argument('--surface_max_attempts', type=int, default=10,
+                               help='Maximum Chroma resampling attempts per requested pose when filtering is enabled.')
+    surface_group.add_argument('--surface_radial_min', type=float,
+                               default=DEFAULT_SURFACE_FILTER['radial_min'],
+                               help='Minimum receptor radial percentile of the binder center.')
+    surface_group.add_argument('--surface_outward_nearby_max', type=float,
+                               default=DEFAULT_SURFACE_FILTER['outward_nearby_max'],
+                               help='Maximum fraction of nearby receptor atoms beyond the binder in the outward direction.')
+    surface_group.add_argument('--surface_occupied_octants_max', type=int,
+                               default=DEFAULT_SURFACE_FILTER['occupied_octants_max'],
+                               help='Maximum occupied 8A octants around the binder center.')
+    surface_group.add_argument('--surface_min_contact_atoms', type=int,
+                               default=DEFAULT_SURFACE_FILTER['min_binder_atoms_within_contact'],
+                               help='Minimum binder atoms within contact distance of receptor atoms.')
+    surface_group.add_argument('--surface_nearby_distance', type=float,
+                               default=DEFAULT_SURFACE_FILTER['nearby_distance'],
+                               help='Distance cutoff in Angstrom for local receptor enclosure metrics.')
+    surface_group.add_argument('--surface_contact_distance', type=float,
+                               default=DEFAULT_SURFACE_FILTER['contact_distance'],
+                               help='Distance cutoff in Angstrom for binder-receptor contact atoms.')
 
     # BO optional arguments
     bo_group = parser.add_argument_group('Bayesian Optimization (optional)')
@@ -516,4 +646,6 @@ if __name__ == '__main__':
         args.num_seqs_per_pose,
         bo_cfg=bo_cfg,
         mpnn_checkpoint=args.mpnn_checkpoint,
+        filter_surface_poses=args.filter_surface_poses,
+        surface_filter_cfg=_surface_filter_cfg(args),
     )

@@ -160,6 +160,25 @@ python run_design.py \
     --gpu 0
 ```
 
+To reject buried/non-surface Chroma poses before ProteinMPNN, enable the
+geometry filter:
+
+```bash
+python run_design.py \
+    --receptor data/4LWV.pdb \
+    --output output_dir \
+    --len_binder 11 \
+    --num_poses 3 \
+    --num_seqs_per_pose 10 \
+    --filter_surface_poses \
+    --surface_max_attempts 20
+```
+
+When this option is enabled, each requested pose must pass the surface-like
+geometry criteria before sequence design. If no valid pose is found within
+`--surface_max_attempts`, the run fails explicitly instead of continuing with a
+bad pose. The output CSV includes the filter decision and geometry metrics.
+
 ### Tier 2: Bayesian Optimization
 
 Add `--bo_rounds` to automatically run BO after Tier 1:
