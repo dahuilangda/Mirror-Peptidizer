@@ -10,8 +10,11 @@ alphabet_list = list(ascii_uppercase+ascii_lowercase)
 from utils.pdb_processing import ld_convert, seq_to_pdb, get_pdb_chains
 from utils.chroma_sample import binder_sample
 from utils.pose_filtering import (
+    DEFAULT_COMPLEXITY_MAX_RUN,
     DEFAULT_SURFACE_FILTER,
     format_surface_pose_metrics,
+    max_homopolymer_run,
+    passes_complexity_filter,
     passes_surface_pose_filter,
     surface_pose_metrics,
 )
@@ -360,6 +363,8 @@ def main(
     mpnn_checkpoint=None,
     filter_surface_poses=False,
     surface_filter_cfg=None,
+    filter_complexity=False,
+    complexity_max_run=DEFAULT_COMPLEXITY_MAX_RUN,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -466,6 +471,20 @@ def main(
             checkpoint_path=mpnn_checkpoint,
         )
 
+        # 3b. Optional: drop sequences with a long homopolymer run.
+        if filter_complexity:
+            kept = []
+            for seq in seqs:
+                run = max_homopolymer_run(seq['sequence'])
+                if passes_complexity_filter(seq['sequence'], complexity_max_run):
+                    kept.append(seq)
+                else:
+                    print(
+                        f"  [complexity] drop Pose {i+1} seq "
+                        f"(run {run} > {complexity_max_run}): {seq['sequence']}"
+                    )
+            seqs = kept
+
         # 4. Get the length of the designed chain and Plot the amino acid probabilities heatmap
         sequence_length = amino_acid_probs.shape[0]
         plot_amino_acid_probs(amino_acid_probs, sequence_length, output_file=os.path.join(image_dir, f'Pose_{i+1}_amino_acid_probs.png'))
@@ -566,6 +585,14 @@ if __name__ == '__main__':
                                default=DEFAULT_SURFACE_FILTER['contact_distance'],
                                help='Distance cutoff in Angstrom for binder-receptor contact atoms.')
 
+    complexity_group = parser.add_argument_group('Sequence-complexity filtering (optional)')
+    complexity_group.add_argument('--filter_complexity', action='store_true',
+                                  help='Drop ProteinMPNN sequences with a long homopolymer run.')
+    complexity_group.add_argument('--complexity_max_run', type=int,
+                                  default=DEFAULT_COMPLEXITY_MAX_RUN,
+                                  help='Max consecutive identical residues allowed before a sequence is dropped '
+                                       '(default %(default)s).')
+
     # BO optional arguments
     bo_group = parser.add_argument_group('Bayesian Optimization (optional)')
     bo_group.add_argument('--bo_rounds', type=int, default=0,
@@ -648,4 +675,6 @@ if __name__ == '__main__':
         mpnn_checkpoint=args.mpnn_checkpoint,
         filter_surface_poses=args.filter_surface_poses,
         surface_filter_cfg=_surface_filter_cfg(args),
+        filter_complexity=args.filter_complexity,
+        complexity_max_run=args.complexity_max_run,
     )

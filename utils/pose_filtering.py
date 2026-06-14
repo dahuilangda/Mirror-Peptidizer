@@ -156,3 +156,28 @@ def format_surface_pose_metrics(metrics: dict[str, float]) -> str:
         f"contact={metrics['binder_atoms_within_contact']:.0f} "
         f"med={metrics['median_receptor_distance']:.2f}"
     )
+
+
+
+# Drop a design whose sequence has a homopolymer run longer than this.
+DEFAULT_COMPLEXITY_MAX_RUN = 5
+
+
+def max_homopolymer_run(sequence: str) -> int:
+    """Longest run of identical residues in ``sequence``."""
+    best = cur = 0
+    prev = None
+    for aa in str(sequence):
+        cur = cur + 1 if aa == prev else 1
+        prev = aa
+        best = max(best, cur)
+    return best
+
+
+def passes_complexity_filter(
+    sequence: str,
+    max_allowed_run: int = DEFAULT_COMPLEXITY_MAX_RUN,
+) -> bool:
+    """True if no residue repeats more than ``max_allowed_run`` times in a row."""
+    return max_homopolymer_run(sequence) <= max_allowed_run
+
