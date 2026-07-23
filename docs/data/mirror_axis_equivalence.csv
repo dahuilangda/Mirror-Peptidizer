@@ -1,0 +1,10 @@
+structure,pair,kabsch_rmsd_A
+"3LNJ (MDM2 / D-pep, 11aa)",x-y,3.823006953119968e-15
+"3LNJ (MDM2 / D-pep, 11aa)",x-z,3.823006953119968e-15
+"3LNJ (MDM2 / D-pep, 11aa)",y-z,3.823006953119968e-15
+"8F10 (MDM2 / stapled D-pep, 15aa)",x-y,6.56877757278936e-15
+"8F10 (MDM2 / stapled D-pep, 15aa)",x-z,6.56877757278936e-15
+"8F10 (MDM2 / stapled D-pep, 15aa)",y-z,6.56877757278936e-15
+"3HTN (native L-control, 139aa)",x-y,6.319862296536739e-15
+"3HTN (native L-control, 139aa)",x-z,6.319862296536739e-15
+"3HTN (native L-control, 139aa)",y-z,6.319862296536739e-15

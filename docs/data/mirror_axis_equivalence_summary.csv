@@ -1,0 +1,10 @@
+structure,axis,n_residues,max_abs_phi_L_plus_phi_D_deg,max_abs_psi_L_plus_psi_D_deg,max_abs_dphi_vs_other_axis_deg,max_abs_dpsi_vs_other_axis_deg
+"3LNJ (MDM2 / D-pep, 11aa)",x,11,0.0,0.0,0.0,0.0
+"3LNJ (MDM2 / D-pep, 11aa)",y,11,0.0,0.0,0.0,0.0
+"3LNJ (MDM2 / D-pep, 11aa)",z,11,0.0,0.0,0.0,0.0
+"8F10 (MDM2 / stapled D-pep, 15aa)",x,15,0.0,0.0,0.0,0.0
+"8F10 (MDM2 / stapled D-pep, 15aa)",y,15,0.0,0.0,0.0,0.0
+"8F10 (MDM2 / stapled D-pep, 15aa)",z,15,0.0,0.0,0.0,0.0
+"3HTN (native L-control, 139aa)",x,139,0.0,0.0,0.0,0.0
+"3HTN (native L-control, 139aa)",y,139,0.0,0.0,0.0,0.0
+"3HTN (native L-control, 139aa)",z,139,0.0,0.0,0.0,0.0

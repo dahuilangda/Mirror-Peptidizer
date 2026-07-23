@@ -79,6 +79,18 @@ After Tier 1 generates initial candidate sequences, the optional BO module itera
 
 The BO loop runs for N rounds, each proposing top-k candidates, converging toward higher-affinity sequences.
 
+### Module reference (step → code)
+
+| Step | What happens | Code |
+|---|---|---|
+| Input preparation | read receptor chains | `utils/pdb_processing.get_pdb_chains` |
+| Coordinate mirroring | reflect receptor along X (L→D); same convention as Garton et al., *PNAS* 2018 | `utils/pdb_processing.ld_convert` (`run_design.py:408`) |
+| Binder backbone | Chroma samples an L-peptide pose on the D-target | `utils/chroma_sample.binder_sample` |
+| (optional) Geometry filter | reject buried / non-surface poses before sequence design | `utils/pose_filtering.passes_surface_pose_filter` |
+| Sequence design | ProteinMPNN redesigns the binder chain (fixed target), T = 0.1 | `utils/protein_mpnn.protein_mpnn` |
+| Reversion | reflect the L-binder back to D; build D-peptide PDB | `utils/pdb_processing.ld_convert`, `seq_to_pdb` |
+| (optional) BO | GP surrogate + acquisition optimize top sequences | `run_design.run_bo_optimization`, `bo/` |
+
 ## Features
 
 - **Stereoisomer Conversion**: Automatically transforms proteins between L and D forms.
@@ -101,8 +113,13 @@ The BO loop runs for N rounds, each proposing top-k candidates, converging towar
 - [Usage](#usage)
   - [Tier 1: Initial Design](#tier-1-initial-design)
   - [Tier 2: Bayesian Optimization](#tier-2-bayesian-optimization)
+- [Output interpretation](#output-interpretation)
 - [Project Structure](#project-structure)
 - [Configuration](#configuration)
+- [Validation & benchmark results](#validation--benchmark-results)
+- [Testing & validation guide (installation self-checks, recovery, mirror QC, ablation, all figures)](docs/testing_and_validation.md)
+- [Installation guide](docs/installation.md)
+- [Computational configuration (ProteinMPNN & BO parameters)](docs/computational_configuration.md)
 
 ## Installation
 
@@ -141,6 +158,27 @@ CHROMA_WEIGHTS_DIR = '/path/to/chroma_weights'
 ProteinMPNN_CHECKPOINT = '/path/to/ProteinMPNN/vanilla_model_weights/v_48_020.pt'
 BOLTZ2EMBEDDING_URL = 'http://your-boltz2-server:8000'
 BOLTZ2EMBEDDING_TOKEN = 'your-api-token'
+```
+
+> **ProteinMPNN checkpoint.** If `ProteinMPNN_CHECKPOINT` is unset, the pipeline uses the
+> vanilla `v_48_020` weights (`ProteinMPNN/vanilla_model_weights/v_48_020.pt`), which is what
+> the manuscript documents. Set the variable only if you intentionally want the soluble-domain
+> prior. The full list of configurable parameters (network, sampling, BO) is in
+> [docs/computational_configuration.md](docs/computational_configuration.md).
+
+### 4. Verify the installation
+
+A quick self-check that the GPU stack and the ProteinMPNN weights load correctly:
+
+```bash
+python -c "
+import torch
+from utils.protein_mpnn import load_model, resolve_checkpoint_path
+print('torch', torch.__version__, '| CUDA', torch.cuda.is_available(), '| n GPU', torch.cuda.device_count())
+print('checkpoint:', resolve_checkpoint_path())
+load_model()  # loads vanilla v_48_020
+print('ProteinMPNN v_48_020 loaded OK')
+"
 ```
 
 ## Usage
@@ -273,6 +311,38 @@ python benchmark/summarize_ld_benchmark.py --benchmark_dir benchmark
 | `--boltz2_url` | (from .env) | Boltz2Embedding API server URL |
 | `--boltz2_token` | (from .env) | Boltz2Embedding API token |
 
+## Output interpretation
+
+A run produces the following layout under `--output`:
+
+```
+output_dir/
+├── results.csv                 # ranked candidates (lower score = better)
+├── Poses/
+│   ├── receptor_D.pdb          # D-form target (mirrored input)
+│   ├── Binder_L_pose_1.pdb     # Chroma L-peptide backbones (Tier-1 input to MPNN)
+│   └── Binder_D_pose_1.pdb     # reverted D-peptide backbones
+├── Binders/                    # one D-peptide PDB per designed sequence
+├── Images/Pose_1_amino_acid_probs.png   # MPNN per-position amino-acid probabilities
+└── BO/                         # (only with --bo_rounds > 0)
+    ├── fitness.csv, bo_results.csv      # BO trajectory + final ranked sequences
+    ├── Eval_PDBs/, Binders/             # evaluated / final D-peptide models
+    └── fitness_round_*.csv              # per-round intermediates
+```
+
+`results.csv` columns:
+
+| Column | Meaning |
+|---|---|
+| `pose`, `sequence`, `score` | pose index, designed D-peptide sequence, ProteinMPNN NLL (lower = more backbone-compatible) |
+| `filename` | D-peptide PDB for the sequence |
+| `surface_*`, `surface_filter_pass` | geometry-filter metrics (only with `--filter_surface_poses`) |
+| `synthesis_*` | SPPS tractability metrics (coupling/aggregation risk) used by BO |
+
+The ProteinMPNN **score is a sequence–backbone compatibility likelihood, not a binding
+affinity** — it ranks candidates for experimental testing, it does not guarantee binding
+(see Discussion in the manuscript).
+
 ## Project Structure
 
 ```
@@ -300,6 +370,14 @@ Mirror-Peptidizer/
 │
 ├── ProteinMPNN/             # Vendored ProteinMPNN model
 ├── examples/                # Example notebooks and scripts
+├── docs/                    # Installation, testing & validation, computational configuration
+│   ├── installation.md      # Detailed setup + 3-level self-checks
+│   ├── testing_and_validation.md  # All tests, figures, tables, reproduce commands
+│   ├── computational_configuration.md  # Exact ProteinMPNN & BO parameters
+│   ├── figures/             # Validation figures (PNG, bundled for GitHub)
+│   ├── data/                # Small result tables (CSV)
+│   └── scripts/             # Bundled copies of the test scripts
+├── benchmark/               # Full benchmark data, figures, recovery test (local; not in repo)
 └── data/                    # Example receptor PDB files
 ```
 
@@ -314,6 +392,58 @@ Ensure these environment variables are set in your `.env` file:
 | `ProteinMPNN_CHECKPOINT` | Optional | ProteinMPNN checkpoint path. Defaults to `ProteinMPNN/vanilla_model_weights/v_48_020.pt`; use a soluble checkpoint only when you explicitly want the soluble-model prior. |
 | `BOLTZ2EMBEDDING_URL` | For BO + Boltz2Embedding | Boltz2Embedding API server URL |
 | `BOLTZ2EMBEDDING_TOKEN` | For BO + Boltz2Embedding | Boltz2Embedding API authentication token |
+
+## Validation & benchmark results
+
+The computational validation supporting the manuscript is documented in detail (with figures,
+tables and reproduce commands) in **[docs/testing_and_validation.md](docs/testing_and_validation.md)**.
+The bundled figures and result tables ship under `docs/figures/` and `docs/data/` so the page is
+self-contained on GitHub. Headline numbers:
+
+**Sequence-recovery validation.** Applying ProteinMPNN to the deposited MDM2 /
+D-peptide complexes **3LNJ** and **8F10** after whole-complex X-axis reflection (fixed D-MDM2,
+redesigned L-peptide, vanilla `v_48_020`, T = 0.1, 100 samples). A no-mirror native L-complex
+control (**3HTN**) recovered **51%** of the native sequence (native score 1.37), matching the
+~52% reported for ProteinMPNN on native backbones and confirming the implementation. Under
+reflection, recovery was **~14% (3LNJ, mean of two complete copies)** and **21% (8F10)**;
+the buried interface hot spots of the 8F10 stapled peptide (Trp, Tyr) were recovered at
+**87–100%**. The depressed global recovery reflects that the reflected D-target backbone is
+out-of-distribution for the L-trained model, while selective hot-spot recovery shows the
+peptide backbone geometry is preserved. Script: `benchmark/recovery_test/run_recovery.py`;
+report: `benchmark/recovery_test/recovery_report.md`.
+
+**Mirror geometry QC.** φ/ψ backbones of every L-target and its D-mirror satisfy
+`|φ_L + φ_D| = 0` and `|ψ_L + ψ_D| = 0` exactly across 2,397 pose pairs (6 targets) — the
+reflection is a geometrically exact enantiomerization. Data: `fig_phi_psi_mirror_qc_summary.csv`.
+
+**D- vs L-peptide score distributions.** After two-stage structural filtering, D- and
+L-peptide candidate pools are highly significantly separated for all three design targets
+(Kolmogorov–Smirnov p < 1 × 10⁻¹⁴⁰; e.g. MDM2 D-median 1.98 vs L-median 1.72, n = 2,007).
+Data: `fig_dl_score_dist_summary.csv`.
+
+**Ablation (filtering + Bayesian Optimization).** The geometry filter removes 350–482
+buried poses per target; BO then lowers the SPPS synthesis penalty by **92–95%** relative to
+Chroma+ProteinMPNN (high → low synthesis-risk class) at a modest score cost, demonstrating
+the score/tractability trade-off. Data: `fig_ablation_bo_tradeoff_*.csv`.
+
+**New-target generalization.** The same Tier-1 workflow ranks candidates on three unseen
+targets — **TNFα, CXCR2, CXCR4** — producing broad, non-redundant candidate pools
+(273–1,796 unique sequences; best scores 1.40–2.09; top-100 mean 1.57–2.28). Data:
+`fig_new_target_score_dist_summary.csv`.
+
+### Testing & validation
+
+> **Full guide with figures, tables and reproduce commands:** [docs/testing_and_validation.md](docs/testing_and_validation.md).
+> **Detailed installation & self-checks:** [docs/installation.md](docs/installation.md).
+
+Quick entry points:
+
+- **Installation self-checks** (3 levels, no Chroma key needed):
+  see [installation.md §6](docs/installation.md#6-verify-the-installation-3-level-self-check).
+- **Full Tier-1 example** (~minutes on a 16 GB GPU): `python run_design.py --receptor data/4LWV.pdb --output output_dir --len_binder 11 --num_poses 3 --num_seqs_per_pose 10`
+- **Sequence-recovery validation** (~5 min on GPU): `python benchmark/recovery_test/run_recovery.py --n_samples 100 --gpu 0`
+- **Mirror-axis equivalence** (pure geometry, no GPU): `python benchmark/recovery_test/mirror_axis_equivalence.py`
+- **Reproduce benchmark figures**: see `benchmark/README.md` and `benchmark/figure_data/README.md` (`benchmark/scripts/plot_*.py`).
 
 ## References
 

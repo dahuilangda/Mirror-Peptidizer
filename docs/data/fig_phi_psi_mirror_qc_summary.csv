@@ -1,0 +1,7 @@
+target,n_pose_pairs,n_paired_phi,n_paired_psi,n_rama_coordinates,max_abs_phi_L_plus_phi_D,max_abs_psi_L_plus_psi_D
+PDL1,400,4950,4950,4550,0.0,0.0
+MDM2,400,4480,4480,4080,0.0,0.0
+IL23R,399,7467,7467,7068,0.0,0.0
+TNFalpha,399,5073,5073,4674,0.0,0.0
+CXCR2,399,5073,5073,4674,0.0,0.0
+CXCR4,399,5073,5073,4674,0.0,0.0
