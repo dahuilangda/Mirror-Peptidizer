@@ -179,10 +179,11 @@ version and keeps the MPNN objective; `run_design.py` is the v2 entry point.)
 - **CPU**: 8+ core CPU for preprocessing and data handling.
 - **Memory**: 8 GB+ system RAM.
 - **Storage**: ~30 GB free disk space for checkpoints, engine caches, temporary outputs and poses.
-- **Docker**: the protenix2dock scoring runs in the Protenix runtime container
-  (`vbio-protenix-v2-runtime:2.0.0` by default) with a V-Bio checkout providing
-  `capabilities/protenix2dock`, the Protenix-v2 model weights and shared caches — every path is a
-  `PROTENIX2DOCK_*` entry in `.env` (see [Configuration](#configuration)).
+- **Docker**: the protenix2dock scoring runs in the Protenix runtime container built from
+  [V-Bio](https://github.com/dahuilangda/V-Bio)'s `DOCKER_PROTENIX_V2_RUNTIME.Dockerfile`
+  (`vbio-protenix-v2-runtime:2.0.0` by default); see
+  [Installation step 3](#3-set-up-the-protenix2dock-scoring-runtime-tier-2) for the three-step
+  setup and [Configuration](#configuration) for the standard paths.
 
 ## Table of Contents
 
@@ -219,21 +220,51 @@ pip install generate-chroma -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install python-dotenv requests -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-### 3. Set Up Environment Variables
+### 3. Set Up the protenix2dock Scoring Runtime (Tier 2)
 
-Copy the example `.env` file and edit it with your API keys, checkpoint paths and the protenix2dock
-runtime locations:
+Tier 2 scores candidates with **protenix2dock** from the open-source
+[V-Bio](https://github.com/dahuilangda/V-Bio) platform. Three steps:
+
+```bash
+# 1) clone V-Bio next to this repo (or anywhere, e.g. /data/V-Bio)
+git clone https://github.com/dahuilangda/V-Bio.git ../V-Bio
+
+# 2) build the Protenix runtime image (inside the V-Bio checkout)
+cd ../V-Bio
+docker build -f deploy/docker/DOCKER_PROTENIX_V2_RUNTIME.Dockerfile \
+    -t vbio-protenix-v2-runtime:2.0.0 .
+
+# 3) put the Protenix-v2 checkpoint and common data under the standard paths
+#    (or point the env vars of the Configuration table at your locations)
+mkdir -p /data/protenix/model /data/protenix/common_cache /data/protenix/module_cache
+#    protenix-v2.pt                    -> /data/protenix/model/
+#    components.cif, components.cif.rdkit_mol.pkl,
+#    clusters-by-entity-40.txt         -> /data/protenix/common_cache/
+```
+
+Then verify everything with the built-in doctor:
+
+```bash
+python -m utils.protenix2dock_client --check
+```
+
+A ColabFold-compatible MSA server is optional: receptor MSAs resolve from the shared md5-keyed
+cache (`/data/boltz_msa_cache`), and when an MSA is missing there, `MSA_SERVER_URL` is used
+(V-Bio ships a ready-made compose stack for it: `deploy/docker/DOCKER_CAP_COLABFOLD_SERVER`).
+
+### 4. Set Up Environment Variables
+
+Copy the example `.env` file and edit it with your API keys and checkpoint paths:
 
 ```bash
 cp env_example .env
 ```
 
-See [Configuration](#configuration) for every variable. The protenix2dock entries follow a standard
-V-Bio deployment (runtime docker image, model weights, shared caches, optional ColabFold-compatible
-MSA server); on the reference machine the receptor MSAs resolve from the shared boltz cache and no
-server is needed.
+The protenix2dock settings need no configuration at all on the standard layout — variable names
+match V-Bio's deploy env files, so a working V-Bio deployment's values can be copied verbatim
+(see [Configuration](#configuration)).
 
-### 4. Verify the installation
+### 5. Verify the installation
 
 A quick self-check that the GPU stack and the ProteinMPNN weights load correctly:
 
@@ -518,16 +549,17 @@ Ensure these environment variables are set in your `.env` file:
 | `ProteinMPNN_CHECKPOINT` | Optional | ProteinMPNN checkpoint path. Defaults to `ProteinMPNN/vanilla_model_weights/v_48_020.pt`; use a soluble checkpoint only when you explicitly want the soluble-model prior. |
 | `BOLTZ2EMBEDDING_URL` | For BO + Boltz2Embedding | Boltz2Embedding API server URL |
 | `BOLTZ2EMBEDDING_TOKEN` | For BO + Boltz2Embedding | Boltz2Embedding API authentication token |
-| `PROTENIX2DOCK_IMAGE` | For BO (Tier 2) | Protenix runtime docker image (default `vbio-protenix-v2-runtime:2.0.0`) |
-| `PROTENIX2DOCK_PYTHON` | For BO (Tier 2) | Python inside the runtime image (default `/usr/local/micromamba/envs/protenix/bin/python`) |
-| `PROTENIX2DOCK_VBIO_DIR` | For BO (Tier 2) | V-Bio checkout providing `capabilities/protenix2dock` (default `/data/V-Bio`) |
-| `PROTENIX2DOCK_SCRIPT` | For BO (Tier 2) | protenix2dock entry script relative to the V-Bio dir |
-| `PROTENIX2DOCK_MODEL_DIR` | For BO (Tier 2) | Protenix-v2 model weights directory |
-| `PROTENIX2DOCK_COMMON_CACHE` | For BO (Tier 2) | Protenix shared common cache |
-| `PROTENIX2DOCK_MSA_CACHE` | For BO (Tier 2) | Shared boltz MSA cache (md5-keyed `msa_<hash>.a3m`); receptor MSAs are seeded from here first |
-| `PROTENIX2DOCK_MODULE_CACHE` | Optional | Writable module cache; makes repeat scoring calls ~3x faster |
-| `PROTENIX2DOCK_MSA_SERVER_URL` | Optional | ColabFold-compatible MSA server; empty = shared cache only |
-| `PROTENIX2DOCK_LOW_VRAM` | Optional | `1` (default) runs the engine's low-VRAM mode for 24 GB cards |
+| `PROTENIX2DOCK_VBIO_DIR` | For Tier 2, if not auto-discovered | V-Bio checkout providing `capabilities/protenix2dock`; auto-discovered at `../V-Bio` or `/data/V-Bio` |
+| `PROTENIX_DOCKER_IMAGE` | Optional | Protenix runtime docker image (default `vbio-protenix-v2-runtime:2.0.0`) |
+| `PROTENIX_MODEL_DIR` | Optional | Protenix-v2 weights directory (default `/data/protenix/model`) |
+| `PROTENIX_COMMON_CACHE_DIR` | Optional | Protenix CCD/cluster cache (default `/data/protenix/common_cache`) |
+| `PROTENIX_MODULE_CACHE_DIR` | Optional | Writable module cache; makes repeat scoring calls ~3x faster (default `/data/protenix/module_cache`) |
+| `BOLTZ_MSA_CACHE_DIR` | Optional | Shared MSA cache, md5-keyed `msa_<hash>.a3m` (default `/data/boltz_msa_cache`) |
+| `MSA_SERVER_URL` | Optional | ColabFold-compatible MSA server; unset = shared cache only |
+
+The `PROTENIX_*` / `BOLTZ_MSA_CACHE_DIR` / `MSA_SERVER_URL` names are V-Bio's own deploy
+variables — values from a working V-Bio `deploy/docker/*.env` work here unchanged. Run
+`python -m utils.protenix2dock_client --check` at any time to diagnose the runtime.
 
 ## Validation & benchmark results
 
@@ -597,7 +629,7 @@ Quick entry points:
 - [ProteinMPNN](https://github.com/dauparas/ProteinMPNN) - Sequence design via protein structure
 - [Chroma](https://github.com/generatebio/chroma) - Generative diffusion model for protein design
 - [Boltz2Embedding](https://github.com/dahuilangda/Boltz2Embedding) - Protein sequence embedding service
-- [Protenix](https://github.com/bytedance/Protenix) / protenix2dock (V-Bio `capabilities/protenix2dock`) - Protenix-engine structure workflow that scores every BO candidate (ipSAE, pLDDT, pose RMSD)
+- [V-Bio](https://github.com/dahuilangda/V-Bio) / protenix2dock (`capabilities/protenix2dock`) - Protenix-engine structure workflow that scores every BO candidate (ipSAE, pLDDT, pose RMSD); built on [Protenix](https://github.com/bytedance/Protenix)
 
 ## License
 

@@ -1,10 +1,36 @@
 """Client for scoring receptor-peptide complexes with protenix2dock.
 
 protenix2dock is the protein-ligand structure workflow on the Protenix engine
-maintained in the V-Bio repository (``capabilities/protenix2dock``). This
+maintained in the open-source V-Bio repository
+(https://github.com/dahuilangda/V-Bio, ``capabilities/protenix2dock``). This
 client shells out to the Protenix runtime docker image with the same mount and
 environment contract the V-Bio backend uses, so Mirror-Peptidizer always
 scores with the latest protenix2dock version without vendoring the engine.
+
+Configuration is deliberately minimal. Everything is optional and defaults to
+the standard V-Bio deployment layout; where environment variables exist they
+reuse V-Bio's own names, so a working V-Bio ``deploy/docker/*.env`` can be
+copied verbatim:
+
+| Setting | Env var (V-Bio name) | Default |
+|---|---|---|
+| V-Bio checkout | `PROTENIX2DOCK_VBIO_DIR` | auto-discovered (sibling `../V-Bio`, `/data/V-Bio`) |
+| runtime image | `PROTENIX_DOCKER_IMAGE` | `vbio-protenix-v2-runtime:2.0.0` |
+| Protenix weights | `PROTENIX_MODEL_DIR` | `/data/protenix/model` |
+| CCD / cluster cache | `PROTENIX_COMMON_CACHE_DIR` | `/data/protenix/common_cache` |
+| module cache (speed) | `PROTENIX_MODULE_CACHE_DIR` | `/data/protenix/module_cache` |
+| shared MSA cache | `BOLTZ_MSA_CACHE_DIR` | `/data/boltz_msa_cache` |
+| ColabFold MSA server | `MSA_SERVER_URL` | *(empty: shared cache only)* |
+
+Setting up the runtime from scratch is three steps (see the README):
+
+```bash
+git clone https://github.com/dahuilangda/V-Bio.git ../V-Bio
+docker build -f deploy/docker/DOCKER_PROTENIX_V2_RUNTIME.Dockerfile \
+    -t vbio-protenix-v2-runtime:2.0.0 .      # run inside the V-Bio checkout
+# put the Protenix-v2 checkpoint + Protenix common data under /data/protenix/
+python -m utils.protenix2dock_client --check  # verify everything
+```
 
 Scoring runs in ``peptide`` mode with two flavours:
 
@@ -30,10 +56,10 @@ MSA handling: Protenix wants an MSA per receptor chain. The shared boltz MSA
 cache (md5-keyed ``msa_<hash>.a3m`` files, the same keys protenix2dock
 derives) is seeded into the per-run work dir so repeat scoring of the same
 receptor needs no MSA server. When seeding misses, the ColabFold-compatible
-MSA server configured via ``PROTENIX2DOCK_MSA_SERVER_URL`` is used and its
-results are written back to the shared cache. The designed (de novo) peptide
-chain deliberately runs without an MSA when no server is configured; with a
-server it is searched per sequence.
+MSA server configured via ``MSA_SERVER_URL`` is used and its results are
+written back to the shared cache. The designed (de novo) peptide chain
+deliberately runs without an MSA when no server is configured; with a server
+it is searched per sequence.
 """
 import hashlib
 import json
@@ -42,18 +68,51 @@ import shutil
 import subprocess
 from pathlib import Path
 
-DEFAULTS = {
-    'PROTENIX2DOCK_IMAGE': 'vbio-protenix-v2-runtime:2.0.0',
-    'PROTENIX2DOCK_PYTHON': '/usr/local/micromamba/envs/protenix/bin/python',
-    'PROTENIX2DOCK_VBIO_DIR': '/data/V-Bio',
-    'PROTENIX2DOCK_SCRIPT': 'capabilities/protenix2dock/protenix2dock.py',
-    'PROTENIX2DOCK_MODEL_DIR': '/data/protenix/model',
-    'PROTENIX2DOCK_COMMON_CACHE': '/data/protenix/common_cache',
-    'PROTENIX2DOCK_MSA_CACHE': '/data/boltz_msa_cache',
-    'PROTENIX2DOCK_MODULE_CACHE': '/data/protenix/module_cache',
-    'PROTENIX2DOCK_MSA_SERVER_URL': '',
-    'PROTENIX2DOCK_LOW_VRAM': '1',
+DEFAULT_IMAGE = 'vbio-protenix-v2-runtime:2.0.0'
+DEFAULT_MODEL_DIR = '/data/protenix/model'
+DEFAULT_COMMON_CACHE = '/data/protenix/common_cache'
+DEFAULT_MODULE_CACHE = '/data/protenix/module_cache'
+DEFAULT_MSA_CACHE = '/data/boltz_msa_cache'
+DEFAULT_SCRIPT = 'capabilities/protenix2dock/protenix2dock.py'
+DEFAULT_PYTHON = '/usr/local/micromamba/envs/protenix/bin/python'
+
+# env var -> (config key, default); names mirror V-Bio's deploy env files so a
+# V-Bio deployment's values work here unchanged
+ENV_SETTINGS = {
+    'PROTENIX_DOCKER_IMAGE': ('image', DEFAULT_IMAGE),
+    'PROTENIX_MODEL_DIR': ('model_dir', DEFAULT_MODEL_DIR),
+    'PROTENIX_COMMON_CACHE_DIR': ('common_cache', DEFAULT_COMMON_CACHE),
+    'PROTENIX_MODULE_CACHE_DIR': ('module_cache', DEFAULT_MODULE_CACHE),
+    'BOLTZ_MSA_CACHE_DIR': ('msa_cache', DEFAULT_MSA_CACHE),
+    'MSA_SERVER_URL': ('msa_server_url', ''),
+    'PROTENIX2DOCK_VBIO_DIR': ('vbio_dir', None),
+    'PROTENIX2DOCK_PYTHON': ('python_bin', DEFAULT_PYTHON),
+    'PROTENIX2DOCK_LOW_VRAM': ('low_vram', '1'),
 }
+
+
+def _repo_root():
+    return Path(__file__).resolve().parents[1]
+
+
+def discover_vbio_dir():
+    """Find a V-Bio checkout that carries capabilities/protenix2dock.
+
+    Order: $PROTENIX2DOCK_VBIO_DIR, $VBIO_DIR, a sibling of this repo
+    (``<repo>/../V-Bio``), ``/data/V-Bio``; the first directory actually
+    containing the protenix2dock entry script wins.
+    """
+    candidates = []
+    for env_name in ('PROTENIX2DOCK_VBIO_DIR', 'VBIO_DIR'):
+        value = os.getenv(env_name, '').strip()
+        if value:
+            candidates.append(Path(value))
+    candidates.append(_repo_root().parent / 'V-Bio')
+    candidates.append(Path('/data/V-Bio'))
+    for candidate in candidates:
+        if (candidate / DEFAULT_SCRIPT).is_file():
+            return str(candidate)
+    return None
 
 _STANDARD_AA = set('ACDEFGHIKLMNPQRSTVWY')
 
@@ -193,17 +252,25 @@ def _best_sample_cif(summary, sample):
 
 
 def load_protenix2dock_config(overrides=None):
-    """Merge DEFAULTS <- .env <- explicit overrides (None values skipped)."""
-    config = dict(DEFAULTS)
+    """Resolve the client configuration.
+
+    Precedence: explicit overrides (constructor kwargs) > environment
+    (optionally loaded from the repo's .env) > V-Bio-standard defaults. The
+    V-Bio checkout is auto-discovered when not configured explicitly.
+    """
     try:
         from dotenv import load_dotenv
-        load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
+        load_dotenv(_repo_root() / '.env')
     except ImportError:
         pass
-    for key in DEFAULTS:
-        env_value = os.getenv(key)
-        if env_value is not None and env_value.strip() != '':
-            config[key] = env_value.strip()
+    config = {key: default for _, (key, default) in ENV_SETTINGS.items()}
+    for env_name, (key, _default) in ENV_SETTINGS.items():
+        value = os.getenv(env_name)
+        if value is not None and value.strip() != '':
+            config[key] = value.strip()
+    if config.get('vbio_dir') is None:
+        config['vbio_dir'] = discover_vbio_dir()
+    config['script'] = DEFAULT_SCRIPT
     for key, value in (overrides or {}).items():
         if value is not None:
             config[key] = str(value)
@@ -259,15 +326,33 @@ def interface_chains_string(receptor_chains, peptide_chains):
 
 
 class Protenix2DockScorer:
-    """Score receptor-peptide complexes via the protenix2dock runtime."""
+    """Score receptor-peptide complexes via the protenix2dock runtime.
 
-    def __init__(self, gpu=0, config=None):
+    Args mirror the environment settings (see module docstring); every kwarg
+    is optional and defaults to the V-Bio-standard layout:
+
+        vbio_dir:       V-Bio checkout (default: auto-discovered)
+        image:          runtime docker image
+        model_dir:      Protenix-v2 checkpoint directory
+        common_cache:   Protenix CCD / cluster cache directory
+        module_cache:   writable module cache (repeat-call speed-up)
+        msa_cache:      shared md5-keyed MSA cache directory
+        msa_server_url: ColabFold-compatible MSA server ('' = cache only)
+        python_bin:     python inside the runtime image
+        low_vram:       '1' for the engine's 24 GB mode
+    """
+
+    def __init__(self, gpu=0, config=None, **overrides):
         self.gpu = int(gpu)
-        self.config = load_protenix2dock_config(config)
+        self.config = load_protenix2dock_config({**(config or {}), **overrides})
         if shutil.which('docker') is None:
             raise RuntimeError(
                 'docker is required to run the protenix2dock runtime image '
-                f'({self.config["PROTENIX2DOCK_IMAGE"]})')
+                f'({self.config["image"]}); install docker first')
+        if not self.config.get('vbio_dir'):
+            raise RuntimeError(
+                'no V-Bio checkout found: clone https://github.com/dahuilangda/V-Bio '
+                '(e.g. next to this repo) or set PROTENIX2DOCK_VBIO_DIR')
 
     # ---------- MSA cache seeding ----------
 
@@ -278,7 +363,7 @@ class Protenix2DockScorer:
         names resolve_msa checks first, so seeded chains never query the
         MSA server.
         """
-        msa_cache = Path(self.config['PROTENIX2DOCK_MSA_CACHE'])
+        msa_cache = Path(self.config['msa_cache'])
         msa_dir = Path(work_dir) / 'msa'
         msa_dir.mkdir(parents=True, exist_ok=True)
         peptide_set = {c for group in peptide_chains for c in group.split(',')}
@@ -304,18 +389,18 @@ class Protenix2DockScorer:
             # loop; HOME moves to the container's writable /tmp
             '--user', f'{os.getuid()}:{os.getgid()}',
             '--env', 'HOME=/tmp',
-            '--volume', f'{cfg["PROTENIX2DOCK_VBIO_DIR"]}:/workspace/vbio:ro',
-            '--volume', f'{cfg["PROTENIX2DOCK_MODEL_DIR"]}:/workspace/model:ro',
-            '--volume', f'{cfg["PROTENIX2DOCK_COMMON_CACHE"]}:/cache/common:ro',
+            '--volume', f'{cfg["vbio_dir"]}:/workspace/vbio:ro',
+            '--volume', f'{cfg["model_dir"]}:/workspace/model:ro',
+            '--volume', f'{cfg["common_cache"]}:/cache/common:ro',
             # rw: protenix2dock writes newly fetched receptor MSAs back here
-            '--volume', f'{cfg["PROTENIX2DOCK_MSA_CACHE"]}:/data/msa_cache',
+            '--volume', f'{cfg["msa_cache"]}:/data/msa_cache',
             '--volume', f'{out_dir}:{out_dir}',
             '--volume', f'{work_dir}:{work_dir}',
             '--volume', '/dev/shm:/dev/shm',
             '--env', 'PYTHONPATH=/workspace/vbio/vendor/protenix-source',
             '--env', 'PROTENIX_ROOT_DIR=/cache',
         ]
-        module_cache = cfg.get('PROTENIX2DOCK_MODULE_CACHE', '')
+        module_cache = cfg.get('module_cache', '')
         if module_cache and os.path.isdir(module_cache):
             cmd += [
                 '--volume', f'{module_cache}:/cache/module_cache',
@@ -325,10 +410,10 @@ class Protenix2DockScorer:
             cmd += ['--env', f'{key}={value}']
         # the V-Bio tree is mounted at /workspace/vbio, so the script runs
         # under its container-side path
-        script = f'/workspace/vbio/{cfg["PROTENIX2DOCK_SCRIPT"]}'
+        script = f'/workspace/vbio/{cfg["script"]}'
         cmd += [
-            cfg['PROTENIX2DOCK_IMAGE'],
-            cfg['PROTENIX2DOCK_PYTHON'],
+            cfg['image'],
+            cfg['python_bin'],
             script,
             *args,
         ]
@@ -400,7 +485,7 @@ class Protenix2DockScorer:
         shutil.copyfile(complex_pdb, staged)
 
         seeded, n_receptor = self.seed_receptor_msa(complex_pdb, peptide_chains, work_dir)
-        server_url = self.config.get('PROTENIX2DOCK_MSA_SERVER_URL', '')
+        server_url = self.config.get('msa_server_url', '')
         if use_msa_server == 'off':
             pass_server = False
         elif use_msa_server == 'on':
@@ -411,8 +496,9 @@ class Protenix2DockScorer:
             if use_msa_server == 'on' or seeded < n_receptor:
                 raise RuntimeError(
                     'receptor MSA not in the shared cache and no MSA server '
-                    'configured; set PROTENIX2DOCK_MSA_SERVER_URL or pre-seed '
-                    f'{self.config["PROTENIX2DOCK_MSA_CACHE"]}')
+                    'configured; set MSA_SERVER_URL (a ColabFold-compatible '
+                    'server, e.g. V-Bio\'s DOCKER_CAP_COLABFOLD_SERVER stack) '
+                    f'or pre-seed {self.config["msa_cache"]}')
 
         args = [
             '--mode', 'peptide',
@@ -438,7 +524,7 @@ class Protenix2DockScorer:
                 args += ['--sampling_steps', str(int(sampling_steps))]
         if pass_server:
             args += ['--msa_server_url', server_url]
-        if str(self.config.get('PROTENIX2DOCK_LOW_VRAM', '1')).strip() in ('1', 'true', 'yes'):
+        if str(self.config.get('low_vram', '1')).strip() in ('1', 'true', 'yes'):
             args.append('--low_vram')
 
         cmd = self._docker_command(args, out_dir, work_dir)
@@ -491,3 +577,113 @@ def summarise_metrics(metrics):
             f"ligand_ipsae_max={fmt('ligand_ipsae_max')} "
             f"iptm={fmt('iptm')} "
             f"pose_rmsd={rmsd_txt}")
+
+
+def check_setup(gpu=0):
+    """Verify every protenix2dock dependency and print a doctor report.
+
+    Returns True when scoring should work. Purely diagnostic — never raises.
+    """
+    cfg = load_protenix2dock_config()
+    ok = True
+
+    def report(item, fine, detail='', fix=''):
+        nonlocal ok
+        ok = ok and fine
+        mark = 'OK  ' if fine else 'FAIL'
+        print(f'[{mark}] {item}' + (f' — {detail}' if detail else ''))
+        if not fine and fix:
+            print(f'       fix: {fix}')
+
+    docker_bin = shutil.which('docker')
+    report('docker', docker_bin is not None,
+           docker_bin or '', 'install docker with NVIDIA Container Toolkit')
+
+    image = cfg['image']
+    image_present = False
+    if docker_bin:
+        probe = subprocess.run(['docker', 'image', 'inspect', image],
+                               capture_output=True, text=True)
+        image_present = probe.returncode == 0
+    report('runtime image', image_present, image,
+           'cd <V-Bio checkout> && docker build -f deploy/docker/'
+           'DOCKER_PROTENIX_V2_RUNTIME.Dockerfile -t ' + image + ' .')
+
+    vbio = cfg.get('vbio_dir')
+    report('V-Bio checkout', bool(vbio), vbio or 'not found',
+           'git clone https://github.com/dahuilangda/V-Bio.git (e.g. next to '
+           'this repo or /data/V-Bio), or set PROTENIX2DOCK_VBIO_DIR')
+
+    model_dir = Path(cfg['model_dir'])
+    weights = sorted(model_dir.glob('*.pt')) if model_dir.is_dir() else []
+    report('Protenix weights', bool(weights),
+           f'{model_dir}: {", ".join(w.name for w in weights) or "empty"}',
+           'place the Protenix-v2 checkpoint (protenix-v2.pt) there, or set '
+           'PROTENIX_MODEL_DIR')
+
+    common = Path(cfg['common_cache'])
+    has_common = (common / 'components.cif').is_file()
+    report('Protenix common cache', has_common, str(common),
+           'place the Protenix CCD/cluster data (components.cif, '
+           'components.cif.rdkit_mol.pkl, clusters-by-entity-40.txt) there, '
+           'or set PROTENIX_COMMON_CACHE_DIR')
+
+    module_cache = Path(str(cfg.get('module_cache') or ''))
+    report('module cache (optional)', module_cache.is_dir(), str(module_cache),
+           f'mkdir -p {module_cache} for ~3x faster repeat scoring '
+           '(set PROTENIX_MODULE_CACHE_DIR to relocate)')
+
+    msa_cache = Path(cfg['msa_cache'])
+    n_msa = len(list(msa_cache.glob('msa_*.a3m'))) if msa_cache.is_dir() else 0
+    report('shared MSA cache (optional)', True,
+           f'{msa_cache}: {n_msa} cached MSAs' if msa_cache.is_dir()
+           else f'{msa_cache}: missing (will be created on first fetch)',
+           f'mkdir -p {msa_cache} or set BOLTZ_MSA_CACHE_DIR')
+
+    server = cfg.get('msa_server_url', '')
+    server_up = False
+    if server:
+        try:
+            import urllib.error
+            import urllib.request
+            urllib.request.urlopen(f'{server.rstrip("/")}/', timeout=5)
+            server_up = True
+        except urllib.error.HTTPError:
+            server_up = True  # any HTTP reply means the server is listening
+        except Exception:
+            server_up = False
+    report('MSA server (optional)', True,
+           f'{server}: reachable' if server_up else
+           (f'{server}: unreachable' if server else 'not configured '
+            '(receptor MSAs must come from the shared cache)'),
+           'run V-Bio\'s ColabFold MSA server (deploy/docker/'
+           'DOCKER_CAP_COLABFOLD_SERVER.compose.yml) and set MSA_SERVER_URL')
+
+    try:
+        import subprocess as _sp
+        gpus = _sp.run(['nvidia-smi', '-L'], capture_output=True, text=True)
+        n_gpu = len([l for l in gpus.stdout.splitlines() if l.startswith('GPU ')])
+    except Exception:
+        n_gpu = 0
+    report('NVIDIA GPU', n_gpu > 0,
+           f'{n_gpu} device(s); scoring will use gpu {gpu}',
+           'a 24 GB card (RTX 4090 class) is recommended')
+
+    print('\n' + ('ready — protenix2dock scoring should work'
+                  if ok else 'NOT ready — resolve the FAIL items above'))
+    return ok
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='protenix2dock scoring client utilities',
+        prog='python -m utils.protenix2dock_client')
+    parser.add_argument('--check', action='store_true',
+                        help='verify docker, the runtime image, the V-Bio '
+                             'checkout, weights, caches and MSA settings')
+    parser.add_argument('--gpu', type=int, default=0)
+    args = parser.parse_args()
+    if args.check:
+        raise SystemExit(0 if check_setup(gpu=args.gpu) else 1)
+    parser.print_help()

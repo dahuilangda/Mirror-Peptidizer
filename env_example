@@ -4,17 +4,17 @@ ProteinMPNN_CHECKPOINT = 'ProteinMPNN/vanilla_model_weights/v_48_020.pt'
 BOLTZ2EMBEDDING_URL = 'http://your-boltz2-server:8000'
 BOLTZ2EMBEDDING_TOKEN = 'your-api-token'
 
-# protenix2dock scoring (optional: --rescore_protenix / v2 BO objective).
-# The client runs the Protenix runtime docker image; these are the defaults
-# of a standard V-Bio deployment — override for your machine.
-PROTENIX2DOCK_IMAGE = 'vbio-protenix-v2-runtime:2.0.0'
-PROTENIX2DOCK_PYTHON = '/usr/local/micromamba/envs/protenix/bin/python'
+# --- protenix2dock scoring (Tier 2 / v2) ---
+# Everything is optional and defaults to the standard V-Bio deployment layout:
+# the V-Bio checkout is auto-discovered (../V-Bio or /data/V-Bio), the runtime
+# image is vbio-protenix-v2-runtime:2.0.0, weights/caches live under
+# /data/protenix/* and the MSA cache at /data/boltz_msa_cache. Only override
+# what differs on your machine — the variable names match V-Bio's deploy env
+# files, so values can be copied from there.
 PROTENIX2DOCK_VBIO_DIR = '/data/V-Bio'
-PROTENIX2DOCK_SCRIPT = 'capabilities/protenix2dock/protenix2dock.py'
-PROTENIX2DOCK_MODEL_DIR = '/data/protenix/model'
-PROTENIX2DOCK_COMMON_CACHE = '/data/protenix/common_cache'
-PROTENIX2DOCK_MSA_CACHE = '/data/boltz_msa_cache'
-PROTENIX2DOCK_MODULE_CACHE = '/data/protenix/module_cache'
-# ColabFold-compatible MSA server; empty = shared cache only
-PROTENIX2DOCK_MSA_SERVER_URL = ''
-PROTENIX2DOCK_LOW_VRAM = '1'
+# PROTENIX_DOCKER_IMAGE   = 'vbio-protenix-v2-runtime:2.0.0'
+# PROTENIX_MODEL_DIR      = '/data/protenix/model'
+# PROTENIX_COMMON_CACHE_DIR = '/data/protenix/common_cache'
+# PROTENIX_MODULE_CACHE_DIR = '/data/protenix/module_cache'
+# BOLTZ_MSA_CACHE_DIR     = '/data/boltz_msa_cache'
+# MSA_SERVER_URL          = 'http://your-colabfold-server:8080'
