@@ -22,7 +22,6 @@ from utils.protein_mpnn import (
     protein_mpnn,
     plot_amino_acid_probs,
     resolve_checkpoint_path,
-    score_complex,
 )
 from bo.scoring import synthesis_metrics
 
@@ -61,12 +60,57 @@ def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg)
         design_chain: chain letter for the designed binder
         output_path: base output directory
         bo_cfg: dict with BO parameters
+
+    The per-sequence oracle is protenix2dock (peptide mode on the complex).
+    In the default **dock** flavour the engine re-docks the peptide against
+    the fixed receptor and the BO fitness is ``ipsae_weight * ipsae_dom +
+    plddt_weight * ligand_plddt - rmsd_weight * peptide_rmsd -
+    synthesis_penalty_weight * synthesis_penalty``. The **score** flavour
+    bypasses diffusion for a fast confidence-only pass without the RMSD term.
+    ProteinMPNN is not part of the BO objective — it only produces the Tier-1
+    seed sequences.
     """
     from bo.encoders import OneHotEncoder, PhysicochemicalEncoder, Boltz2Encoder, AAS
     from bo.models import GPRegressor
     from bo.explorers import BO_EVO, MCMC, Boltz2BO, validate_bo_proposal_config
     from bo.landscape import EXPLandscape
     from bo.scoring import synthesis_metrics
+    from utils.protenix2dock_client import Protenix2DockScorer
+
+    protenix_scorer = Protenix2DockScorer(
+        gpu=bo_cfg.get('protenix_gpu', 0),
+        config=None,
+    )
+    # final-form complex (L-target + D-peptide) by default: the large
+    # receptor chain stays in-distribution for Protenix; 'mirror' scores
+    # the Chroma-side complex (D-target + L-peptide) instead
+    form = bo_cfg.get('protenix_form', 'final')
+    template_pdb = (
+        L_binder.replace('_L_', '_D_') if form == 'final' else L_binder
+    )
+    if not os.path.exists(template_pdb):
+        raise FileNotFoundError(
+            f'BO scoring needs the {"D-form" if form == "final" else "L-form"} '
+            f'complex PDB {template_pdb}')
+    ipsae_weight = float(bo_cfg.get('ipsae_weight', 0.6))
+    plddt_weight = float(bo_cfg.get('plddt_weight', 0.4))
+    rmsd_weight = float(bo_cfg.get('rmsd_weight', 0.05))
+    protenix_mode = bo_cfg.get('protenix_mode', 'dock')
+    if protenix_mode not in ('dock', 'score'):
+        raise ValueError(
+            f"bo_protenix_mode must be 'dock' or 'score', got {protenix_mode!r}")
+    protenix_score_only = protenix_mode == 'score'
+    protenix_use_msa = bo_cfg.get('protenix_msa', 'auto')
+    protenix_seed = int(bo_cfg.get('protenix_seed', 42))
+    protenix_diffusion_samples = bo_cfg.get('protenix_diffusion_samples')
+    protenix_sampling_steps = bo_cfg.get('protenix_sampling_steps')
+    print(
+        f"BO scoring: protenix2dock (form={form}, mode={protenix_mode}, "
+        f"fitness = {ipsae_weight}*ipsae_dom + {plddt_weight}*ligand_plddt "
+        f"- {rmsd_weight}*peptide_rmsd"
+        + (f" - {bo_cfg.get('synthesis_penalty_weight', 0.0)}*synthesis_penalty"
+           if bo_cfg.get('synthesis_penalty_weight', 0) else "")
+    )
 
     boltz2_url = bo_cfg.get('boltz2_url')
     boltz2_token = bo_cfg.get('boltz2_token')
@@ -130,28 +174,55 @@ def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg)
         pass  # Boltz2BO does its own lightweight validation
 
     def _score_sequence_for_bo(seq, round_idx='initial', write_pdb=False):
+        # protenix2dock oracle: score the mutated complex with the Protenix
+        # confidence heads; ipSAE + peptide pLDDT (+ pose RMSD in dock mode)
+        # drive the fitness
         metrics = synthesis_metrics(seq)
         mut_pdb = (
             os.path.join(eval_pdb_dir, f'round{round_idx}_{seq}.pdb')
             if write_pdb else os.path.join(bo_dir, f'_eval_{seq}.pdb')
         )
-        mpnn_score = np.nan
-        fitness = np.nan
+        seq_to_pdb(seq, template_pdb, mut_pdb, design_chain=design_chain)
+        job_dir = (
+            os.path.join(eval_pdb_dir, f'round{round_idx}_{seq}_protenix')
+            if keep_intermediates
+            else os.path.join(bo_dir, f'_protenix_{seq}')
+        )
         try:
-            seq_to_pdb(seq, L_binder, mut_pdb, design_chain=design_chain)
-            mpnn_score = score_complex(
+            px = protenix_scorer.score_peptide_complex(
                 mut_pdb,
-                design_chain,
-                checkpoint_path=bo_cfg.get('mpnn_checkpoint'),
+                peptide_chain=design_chain,
+                out_dir=job_dir,
+                peptide_sequence=seq,
+                score_only=protenix_score_only,
+                seed=protenix_seed,
+                use_msa_server=protenix_use_msa,
+                diffusion_samples=protenix_diffusion_samples,
+                sampling_steps=protenix_sampling_steps,
             )
-            fitness = -mpnn_score - synthesis_penalty_weight * metrics['synthesis_penalty']
         finally:
-            if not write_pdb and os.path.exists(mut_pdb):
-                os.remove(mut_pdb)
+            if not keep_intermediates:
+                import shutil as _shutil
+                _shutil.rmtree(job_dir, ignore_errors=True)
+                if os.path.exists(mut_pdb):
+                    os.remove(mut_pdb)
+        pose_rmsd = px.get('peptide_rmsd')
+        fitness = (
+            ipsae_weight * float(px.get('ipsae_dom') or 0.0)
+            + plddt_weight * float(px.get('ligand_plddt') or 0.0)
+            - (rmsd_weight * float(pose_rmsd) if pose_rmsd is not None else 0.0)
+            - synthesis_penalty_weight * metrics['synthesis_penalty']
+        )
         return {
             'Variants': seq,
             'Fitness': fitness,
-            'MPNN_score': mpnn_score,
+            'ipsae_dom': px.get('ipsae_dom'),
+            'ligand_ipsae_max': px.get('ligand_ipsae_max'),
+            'ligand_plddt': px.get('ligand_plddt'),
+            'peptide_rmsd': pose_rmsd,
+            'iptm': px.get('iptm'),
+            'ranking_score': px.get('ranking_score'),
+            'interface_pair_count': px.get('interface_pair_count'),
             **metrics,
         }
 
@@ -184,18 +255,19 @@ def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg)
             .sort_values('score', ascending=True)
             .drop_duplicates(subset=['sequence'], keep='first')
         )
+        # Tier-1 ranks by the MPNN NLL, which is not the BO objective: the
+        # seed sequences are re-evaluated with protenix2dock so the GP trains
+        # on the same fitness the BO loop will optimize
+        init_top_n = int(bo_cfg.get('protenix_init_top', 10))
         rows = []
-        for _, row in top_seqs.iterrows():
-            metrics = synthesis_metrics(row['sequence'])
-            mpnn_score = float(row['score'])
-            fitness = -mpnn_score - synthesis_penalty_weight * metrics['synthesis_penalty']
-            rows.append({
-                'Variants': row['sequence'],
-                'Fitness': fitness,
-                'MPNN_score': mpnn_score,
-                **metrics,
-                'is_init_proposed_seq': True,
-            })
+        for rank, (_, row) in enumerate(top_seqs.head(init_top_n).iterrows(), start=1):
+            seq_row = _score_sequence_for_bo(
+                row['sequence'],
+                round_idx=f'init{rank}',
+                write_pdb=keep_intermediates,
+            )
+            seq_row['is_init_proposed_seq'] = True
+            rows.append(seq_row)
         df_fitness = pd.DataFrame(rows)
     elif init_source == 'random':
         init_count = int(bo_cfg.get('init_count', bo_cfg.get('trials', 10)))
@@ -337,7 +409,7 @@ def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg)
     print(f"\nBO results saved to {os.path.join(bo_dir, 'bo_results.csv')}")
 
     # Generate D-peptide PDBs for top BO candidates.
-    D_binder = os.path.join(os.path.dirname(L_binder), 'Binder_D_pose_1.pdb')
+    D_binder = L_binder.replace('_L_', '_D_')
     if os.path.exists(D_binder):
         bo_binder_dir = os.path.join(bo_dir, 'Binders')
         os.makedirs(bo_binder_dir, exist_ok=True)
@@ -595,6 +667,37 @@ if __name__ == '__main__':
 
     # BO optional arguments
     bo_group = parser.add_argument_group('Bayesian Optimization (optional)')
+    bo_group.add_argument('--bo_ipsae_weight', type=float, default=0.6,
+                          help='Weight of ipsae_dom in the protenix BO fitness (default %(default)s)')
+    bo_group.add_argument('--bo_plddt_weight', type=float, default=0.4,
+                          help='Weight of ligand_plddt in the protenix BO fitness (default %(default)s)')
+    bo_group.add_argument('--bo_rmsd_weight', type=float, default=0.05,
+                          help='Weight of the peptide pose RMSD penalty in A (dock mode only, '
+                               'default %(default)s)')
+    bo_group.add_argument('--bo_protenix_form', type=str, default='final',
+                          choices=['final', 'mirror'],
+                          help="Complex scored by protenix2dock: 'final' (L-target + D-peptide, "
+                               "default) or 'mirror' (D-target + L-peptide, the Chroma-side pose)")
+    bo_group.add_argument('--bo_protenix_mode', type=str, default='dock',
+                          choices=['dock', 'score'],
+                          help="protenix2dock flavour: 'dock' (default) re-docks the peptide "
+                               "against the fixed receptor and adds the pose RMSD to the fitness; "
+                               "'score' is the fast confidence-only pass without RMSD")
+    bo_group.add_argument('--bo_protenix_diffusion_samples', type=int, default=None,
+                          help='Diffusion samples in dock mode (default: engine mode config)')
+    bo_group.add_argument('--bo_protenix_sampling_steps', type=int, default=None,
+                          help='Diffusion steps in dock mode (default: engine mode config)')
+    bo_group.add_argument('--bo_protenix_msa', type=str, default='auto',
+                          choices=['auto', 'on', 'off'],
+                          help='MSA server usage for protenix2dock: auto (shared cache first), '
+                               'on (always pass the server), off (cache hits only)')
+    bo_group.add_argument('--bo_protenix_gpu', type=int, default=None,
+                          help='GPU for the protenix2dock runtime container (default: same as --gpu)')
+    bo_group.add_argument('--bo_protenix_seed', type=int, default=42,
+                          help='Seed for the protenix2dock engine (default %(default)s)')
+    bo_group.add_argument('--bo_protenix_init_top', type=int, default=10,
+                          help='Tier-1 seed sequences re-evaluated with protenix2dock as BO init '
+                               '(default %(default)s)')
     bo_group.add_argument('--bo_rounds', type=int, default=0,
                           help='Number of BO rounds (0 = disabled, default)')
     bo_group.add_argument('--bo_trials', type=int, default=10,
@@ -647,11 +750,21 @@ if __name__ == '__main__':
             'acquisition': args.bo_acquisition,
             'uf_param': args.bo_uf_param,
             'model_queries': args.bo_model_queries,
+            'ipsae_weight': args.bo_ipsae_weight,
+            'plddt_weight': args.bo_plddt_weight,
+            'rmsd_weight': args.bo_rmsd_weight,
+            'protenix_form': args.bo_protenix_form,
+            'protenix_mode': args.bo_protenix_mode,
+            'protenix_diffusion_samples': args.bo_protenix_diffusion_samples,
+            'protenix_sampling_steps': args.bo_protenix_sampling_steps,
+            'protenix_msa': args.bo_protenix_msa,
+            'protenix_gpu': (args.bo_protenix_gpu if args.bo_protenix_gpu is not None else args.gpu),
+            'protenix_seed': args.bo_protenix_seed,
+            'protenix_init_top': args.bo_protenix_init_top,
             'boltz2_url': args.boltz2_url,
             'boltz2_token': args.boltz2_token,
             'boltz2_batch_size': args.boltz2_batch_size,
             'boltz2_max_parallel_jobs': args.boltz2_max_parallel_jobs,
-            'mpnn_checkpoint': args.mpnn_checkpoint,
             'init_source': args.bo_init_source,
             'init_count': args.bo_random_init_seqs,
             'synthesis_penalty_weight': args.synthesis_penalty_weight,
