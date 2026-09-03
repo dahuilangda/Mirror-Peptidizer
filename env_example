@@ -5,12 +5,6 @@ BOLTZ2EMBEDDING_URL = 'http://your-boltz2-server:8000'
 BOLTZ2EMBEDDING_TOKEN = 'your-api-token'
 
 # --- protenix2dock scoring (Tier 2 / v2) ---
-# Everything is optional and defaults to the standard V-Bio deployment layout:
-# the V-Bio checkout is auto-discovered (../V-Bio or /data/V-Bio), the runtime
-# image is vbio-protenix-v2-runtime:2.0.0, weights/caches live under
-# /data/protenix/* and the MSA cache at /data/boltz_msa_cache. Only override
-# what differs on your machine — the variable names match V-Bio's deploy env
-# files, so values can be copied from there.
 PROTENIX2DOCK_VBIO_DIR = '/data/V-Bio'
 # PROTENIX_DOCKER_IMAGE   = 'vbio-protenix-v2-runtime:2.0.0'
 # PROTENIX_MODEL_DIR      = '/data/protenix/model'
