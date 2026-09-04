@@ -7,25 +7,38 @@ from .pdb_processing import fix_pdb
 def _get_chroma_weights():
     """Resolve Chroma weight paths from .env or local chroma_weights/ directory."""
     from dotenv import load_dotenv
-    load_dotenv()
+    # load the repo-root .env explicitly so resolution does not depend on the
+    # caller's working directory (e.g. Jupyter kernels started in examples/)
+    load_dotenv(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
     backbone = os.getenv('CHROMA_WEIGHTS_BACKBONE')
     design = os.getenv('CHROMA_WEIGHTS_DESIGN')
     if backbone and design:
         return backbone, design
 
-    weights_dir = os.getenv('CHROMA_WEIGHTS_DIR',
-                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'chroma_weights'))
-    backbone_path = None
-    design_path = None
-    if os.path.isdir(weights_dir):
-        for subdir in os.listdir(weights_dir):
-            full = os.path.join(weights_dir, subdir, 'weights.pt')
-            if os.path.isfile(full):
-                if os.path.getsize(full) > 60_000_000:
-                    backbone_path = full
-                else:
-                    design_path = full
+    default_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'chroma_weights')
+    weights_dir = os.getenv('CHROMA_WEIGHTS_DIR', default_dir)
+
+    def _scan_weights(directory):
+        backbone_path = None
+        design_path = None
+        if os.path.isdir(directory):
+            for subdir in os.listdir(directory):
+                full = os.path.join(directory, subdir, 'weights.pt')
+                if os.path.isfile(full):
+                    if os.path.getsize(full) > 60_000_000:
+                        backbone_path = full
+                    else:
+                        design_path = full
+        return backbone_path, design_path
+
+    backbone_path, design_path = _scan_weights(weights_dir)
+    if not (backbone_path and design_path) and weights_dir != default_dir:
+        # configured directory holds no weights (stale/typo'd value): fall
+        # back to the repo's own chroma_weights/ instead of downloading
+        backbone_path, design_path = _scan_weights(default_dir)
     return backbone_path, design_path
 
 

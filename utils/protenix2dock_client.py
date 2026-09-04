@@ -34,15 +34,19 @@ python -m utils.protenix2dock_client --check  # verify everything
 
 Scoring runs in ``peptide`` mode with two flavours:
 
-- **dock** (default): receptor-fixed peptide re-docking — the diffusion
-  refines the placed peptide against the pinned receptor, so the engine both
-  scores the sequence and stress-tests the Chroma pose. The pose RMSD between
-  the input (Chroma) peptide and the engine's output peptide (after receptor
-  superposition) is reported as ``peptide_rmsd`` in Angstrom; a sequence whose
-  pose Protenix cannot reproduce drifts to a high RMSD.
-- **score**: diffusion bypassed (``--score_only``); the confidence heads
-  evaluate the input coordinates directly. Fast single-sample pass with no
-  RMSD (``peptide_rmsd`` is None).
+- **score** (recommended for BO fitness, and the run_design default since
+  2026-09-04): diffusion bypassed (``--score_only``) — the confidence heads
+  evaluate the Chroma-staged complex directly, so the fitness scores the
+  ACTUAL candidate pose. Validated core path (3LNJ round-trip ipTM
+  0.935-0.948). Fast single-sample pass; ``peptide_rmsd`` is None.
+- **dock**: receptor-pinned BLIND inpainting — the peptide denoises from
+  pure noise on the full schedule, so the pose comes from the engine's own
+  prior (MSA/trained docking) and the reported ``peptide_rmsd`` (input
+  Chroma pose vs engine output, receptor-superposed) is an INDEPENDENT
+  agreement test: low RMSD means the engine confirms the Chroma pose, high
+  RMSD flags disagreement. Stress test / confirmation, not the primary
+  fitness; for de novo sequences without homologs the blind pose quality
+  is not guaranteed (see /data/Boltz2Score/dpeptide_test/REPORT.md).
 
 Both flavours report the interface metrics scoped to the declared interface
 chains:
@@ -67,6 +71,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 DEFAULT_IMAGE = 'vbio-protenix-v2-runtime:2.0.0'
 DEFAULT_MODEL_DIR = '/data/protenix/model'
@@ -87,7 +92,6 @@ ENV_SETTINGS = {
     'MSA_SERVER_URL': ('msa_server_url', ''),
     'PROTENIX2DOCK_VBIO_DIR': ('vbio_dir', None),
     'PROTENIX2DOCK_PYTHON': ('python_bin', DEFAULT_PYTHON),
-    'PROTENIX2DOCK_LOW_VRAM': ('low_vram', '1'),
 }
 
 
@@ -281,6 +285,26 @@ def _md5(text):
     return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 
+def _container_msa_url(server_url):
+    """Rewrite a loopback MSA server URL for use inside the runtime container.
+
+    A URL like http://127.0.0.1:8080 (the common deployment: the MSA server
+    runs on the host next to this client) points at the container itself under
+    docker's default bridge network. host.docker.internal — with
+    ``--add-host host.docker.internal:host-gateway`` added to the docker run —
+    reaches the host instead.
+
+    Returns (url_for_container, is_loopback).
+    """
+    if not server_url:
+        return server_url, False
+    parsed = urlparse(server_url)
+    if parsed.hostname in ('127.0.0.1', 'localhost', '::1'):
+        netloc = parsed.netloc.replace(parsed.hostname, 'host.docker.internal', 1)
+        return urlunparse(parsed._replace(netloc=netloc)), True
+    return server_url, False
+
+
 def _normalise_sequence(seq):
     # protenix2dock resolves the shared cache key on the sequence with
     # non-standard letters collapsed to A; mirror that exactly
@@ -339,7 +363,6 @@ class Protenix2DockScorer:
         msa_cache:      shared md5-keyed MSA cache directory
         msa_server_url: ColabFold-compatible MSA server ('' = cache only)
         python_bin:     python inside the runtime image
-        low_vram:       '1' for the engine's 24 GB mode
     """
 
     def __init__(self, gpu=0, config=None, **overrides):
@@ -380,7 +403,8 @@ class Protenix2DockScorer:
 
     # ---------- docker invocation ----------
 
-    def _docker_command(self, args, out_dir, work_dir, extra_env=None):
+    def _docker_command(self, args, out_dir, work_dir, extra_env=None,
+                        add_host_gateway=False):
         cfg = self.config
         cmd = [
             'docker', 'run', '--rm', '--entrypoint=',
@@ -406,6 +430,10 @@ class Protenix2DockScorer:
                 '--volume', f'{module_cache}:/cache/module_cache',
                 '--env', 'PROTENIX_MODULE_CACHE_DIR=/cache/module_cache',
             ]
+        if add_host_gateway:
+            # lets the engine container reach an MSA server bound to the
+            # host's loopback via host.docker.internal
+            cmd += ['--add-host', 'host.docker.internal:host-gateway']
         for key, value in (extra_env or {}).items():
             cmd += ['--env', f'{key}={value}']
         # the V-Bio tree is mounted at /workspace/vbio, so the script runs
@@ -449,9 +477,12 @@ class Protenix2DockScorer:
                 re-docking with diffusion and a pose RMSD; True = score mode,
                 diffusion bypassed (confidence heads on input coords, no RMSD)
             interface_chains: 'A,B' group string; default receptor,peptide
-            use_msa_server: 'auto' (server only when cache seeding misses),
-                'on' (always pass the server URL), 'off' (never — requires
-                every receptor MSA to seed from the shared cache)
+            use_msa_server: 'auto' (server when a receptor MSA misses the
+                shared cache, and always in dock mode — the de novo peptide
+                chain needs a freshly searched MSA there), 'on' (always pass
+                the server URL), 'off' (never — requires every receptor MSA
+                to seed from the shared cache; dock mode then needs the
+                peptide MSA cached too)
             diffusion_samples / sampling_steps: overrides in dock mode
 
         Returns:
@@ -491,14 +522,18 @@ class Protenix2DockScorer:
         elif use_msa_server == 'on':
             pass_server = True
         else:  # auto
-            pass_server = seeded < n_receptor or n_receptor == 0
+            # dock mode must also fetch an MSA for the de novo peptide chain
+            # (engine requirement); score mode tolerates a peptide without one
+            pass_server = seeded < n_receptor or n_receptor == 0 or not score_only
         if pass_server and not server_url:
-            if use_msa_server == 'on' or seeded < n_receptor:
-                raise RuntimeError(
-                    'receptor MSA not in the shared cache and no MSA server '
-                    'configured; set MSA_SERVER_URL (a ColabFold-compatible '
-                    'server, e.g. V-Bio\'s DOCKER_CAP_COLABFOLD_SERVER stack) '
-                    f'or pre-seed {self.config["msa_cache"]}')
+            # Official MSA semantics (2026-09-04): the MSA is OPTIONAL input.
+            # Without a server the chains run on the query-only MSA (N_msa=1)
+            # — the engine featurizes it natively. Loud log, not an error.
+            print(
+                '[protenix2dock] no MSA server configured — chains run on '
+                'query-only MSAs (official N_msa=1 contract); set '
+                'MSA_SERVER_URL for homolog-enriched scoring')
+            pass_server = False
 
         args = [
             '--mode', 'peptide',
@@ -517,17 +552,23 @@ class Protenix2DockScorer:
             # default of 8 wastes disk and time on identical evaluations)
             args += ['--score_only', '--diffusion_samples', '1']
         else:
-            # dock mode: receptor-fixed peptide re-docking with diffusion
+            # dock mode: receptor-pinned BLIND inpainting (2026-09-04 V-Bio
+            # protocol). The peptide denoises from PURE NOISE on the full
+            # schedule; the pose comes from the engine's own prior (MSA /
+            # trained docking), never from a hand placement. peptide_rmsd vs
+            # the Chroma pose becomes an INDEPENDENT pose agreement test.
+            args += ['--blind_peptide']
             if diffusion_samples:
                 args += ['--diffusion_samples', str(int(diffusion_samples))]
             if sampling_steps:
                 args += ['--sampling_steps', str(int(sampling_steps))]
+        loopback = False
         if pass_server:
-            args += ['--msa_server_url', server_url]
-        if str(self.config.get('low_vram', '1')).strip() in ('1', 'true', 'yes'):
-            args.append('--low_vram')
+            container_url, loopback = _container_msa_url(server_url)
+            args += ['--msa_server_url', container_url]
 
-        cmd = self._docker_command(args, out_dir, work_dir)
+        cmd = self._docker_command(args, out_dir, work_dir,
+                                   add_host_gateway=pass_server and loopback)
         if verbose:
             print('[protenix2dock]', ' '.join(cmd))
         result = subprocess.run(

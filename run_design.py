@@ -95,7 +95,10 @@ def run_bo_optimization(L_binder, binder_seq, design_chain, output_path, bo_cfg)
     ipsae_weight = float(bo_cfg.get('ipsae_weight', 0.6))
     plddt_weight = float(bo_cfg.get('plddt_weight', 0.4))
     rmsd_weight = float(bo_cfg.get('rmsd_weight', 0.05))
-    protenix_mode = bo_cfg.get('protenix_mode', 'dock')
+    # 2026-09-04: BO 适应度默认走 score 档 — 直接用置信头评估 Chroma 提议
+    # 姿态(8/26 报告验证的核心路径, ipTM 0.935-0.948)。旧默认 dock(局部精修)
+    # 的 ipSAE 不可信: 坏摆位被锚定在埋置位形里,精修产出互锁/手性破坏结构后
+    # 仍然自我确证。dock 档(现为盲 inpainting)保留为独立姿态一致性检验。
     if protenix_mode not in ('dock', 'score'):
         raise ValueError(
             f"bo_protenix_mode must be 'dock' or 'score', got {protenix_mode!r}")
@@ -678,7 +681,7 @@ if __name__ == '__main__':
                           choices=['final', 'mirror'],
                           help="Complex scored by protenix2dock: 'final' (L-target + D-peptide, "
                                "default) or 'mirror' (D-target + L-peptide, the Chroma-side pose)")
-    bo_group.add_argument('--bo_protenix_mode', type=str, default='dock',
+    bo_group.add_argument('--bo_protenix_mode', type=str, default='score',
                           choices=['dock', 'score'],
                           help="protenix2dock flavour: 'dock' (default) re-docks the peptide "
                                "against the fixed receptor and adds the pose RMSD to the fitness; "
