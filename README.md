@@ -4,6 +4,21 @@
 
 This approach leverages stereoisomer-specific modeling and sequence generation for D-peptides, aiming to improve binding accuracy and efficiency over traditional simulation and docking techniques.
 
+> **Recommended: the [`v2` branch](https://github.com/dahuilangda/Mirror-Peptidizer/tree/v2).**
+> `v2` keeps this Tier-1/Tier-2 pipeline but upgrades the BO objective from the ProteinMPNN NLL to
+> structure-based scoring with **protenix2dock** (interface ipSAE, peptide pLDDT, pose RMSD), the
+> protein–ligand workflow shipped in [V-Bio](https://github.com/dahuilangda/V-Bio)
+> (`git clone https://github.com/dahuilangda/V-Bio.git`). This `main` branch carries the pipeline
+> exactly as published (BO fitness = ProteinMPNN NLL).
+
+## Publication
+
+This work is published in ***Research*** (Science Partner Journal):
+
+> Bohan Ma, Zhe Wang, Yanlin Jian, Yonghong Mi, Si Chen, Honggang Hu, Xiang Li.
+> **Mirror-Peptidizer: In Silico Mirror-Image Screening Enables De Novo Design of D-Peptide Binders without D-Protein Synthesis.**
+> *Research* **2026**, 9, 1420. [DOI: 10.34133/research.1420](https://doi.org/10.34133/research.1420)
+
 ```plaintext
 +---------------------------+
 |       Target Preparation  |
