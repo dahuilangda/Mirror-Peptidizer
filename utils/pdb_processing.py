@@ -1,8 +1,60 @@
+import os
+
 from Bio.PDB import PDBParser, PDBIO
 from pdbfixer import PDBFixer
 from openmm.app import PDBFile, Simulation, ForceField, NoCutoff, HBonds
-from openmm import LangevinIntegrator, Vec3
+from openmm import (
+    Context,
+    LangevinIntegrator,
+    NonbondedForce,
+    Platform,
+    System,
+    Vec3,
+    VerletIntegrator,
+)
 from openmm.unit import dalton, kelvin, nanometer, picosecond, picoseconds
+
+PLATFORM_PREFERENCE = ('OpenCL', 'CPU')
+_selected_platform = None
+
+
+def _probe_platform(name):
+    '''Check that a platform can actually create a Context. The CUDA module
+    may fail to load when OpenMM was built with a newer CUDA toolkit than
+    the installed driver supports (CUDA_ERROR_UNSUPPORTED_PTX_VERSION).'''
+    system = System()
+    system.addParticle(1.0)
+    nonbonded = NonbondedForce()
+    nonbonded.addParticle(0.0, 0.0, 0.0)
+    system.addForce(nonbonded)
+    try:
+        context = Context(system, VerletIntegrator(0.001), Platform.getPlatformByName(name))
+        del context
+        return True
+    except Exception:
+        return False
+
+
+def _select_platform(preferred=None):
+    '''Pick an OpenMM platform: explicit choice, then the OPENMM_PLATFORM
+    environment variable, then the fastest platform that actually works.'''
+    global _selected_platform
+    name = preferred or os.environ.get('OPENMM_PLATFORM')
+    if name:
+        return Platform.getPlatformByName(name)
+    if _selected_platform is None:
+        for candidate in PLATFORM_PREFERENCE:
+            if _probe_platform(candidate):
+                _selected_platform = Platform.getPlatformByName(candidate)
+                break
+        if _selected_platform is None:
+            _selected_platform = Platform.getPlatformByName('CPU')
+        # if _selected_platform.getName() != 'CUDA':
+        #     print(
+        #         f"Warning: CUDA platform unavailable, using {_selected_platform.getName()}. "
+        #         f"Set OPENMM_PLATFORM to override."
+        #     )
+    return _selected_platform
 
 def ld_convert(input_pdb, output_pdb):
     parser = PDBParser()
@@ -56,7 +108,7 @@ def _backbone_positions_from_pdb(pdb_file):
     }
 
 
-def seq_to_pdb(seq, pdb, output_pdb, design_chain='B', minimize=True, remove_hydrogens=True, fix_backbone=True):
+def seq_to_pdb(seq, pdb, output_pdb, design_chain='B', minimize=True, remove_hydrogens=True, fix_backbone=True, platform=None):
     aa_list = one_to_three(seq)
     new_line = []
     chain_residue_num = None
@@ -102,6 +154,7 @@ def seq_to_pdb(seq, pdb, output_pdb, design_chain='B', minimize=True, remove_hyd
         minimize=minimize,
         remove_hydrogens=remove_hydrogens,
         fix_backbone=fix_backbone,
+        platform=platform,
     )
 
 def get_pdb_chains(pdb_file_path):
@@ -135,6 +188,7 @@ def fix_pdb(
     remove_hydrogens=True,
     fix_backbone=True,
     restrain_backbone=None,
+    platform=None,
 ):
     if restrain_backbone is not None:
         fix_backbone = restrain_backbone
@@ -188,7 +242,7 @@ def fix_pdb(
         )
 
         # Set up the simulation
-        simulation = Simulation(fixer.topology, system, integrator)
+        simulation = Simulation(fixer.topology, system, integrator, _select_platform(platform))
 
         # Set the initial positions
         simulation.context.setPositions(fixer.positions)
