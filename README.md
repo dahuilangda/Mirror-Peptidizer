@@ -5,11 +5,14 @@
 This approach leverages stereoisomer-specific modeling and sequence generation for D-peptides, aiming to improve binding accuracy and efficiency over traditional simulation and docking techniques.
 
 > **Recommended: the [`v2` branch](https://github.com/dahuilangda/Mirror-Peptidizer/tree/v2).**
-> `v2` keeps this Tier-1/Tier-2 pipeline but upgrades the BO objective from the ProteinMPNN NLL to
-> structure-based scoring with **protenix2dock** (interface ipSAE, peptide pLDDT, pose RMSD), the
-> protein–ligand workflow shipped in [V-Bio](https://github.com/dahuilangda/V-Bio)
-> (`git clone https://github.com/dahuilangda/V-Bio.git`). This `main` branch carries the pipeline
-> exactly as published (BO fitness = ProteinMPNN NLL).
+> `v2` keeps this Tier-1/Tier-2 pipeline but upgrades the BO objective from the ProteinMPNN NLL to structure based scoring with **protenix2dock** (interface ipSAE, peptide pLDDT, pose RMSD).
+> protenix2dock is a modified Protenix for docking and interface scoring, shipped in [V-Bio](https://github.com/dahuilangda/V-Bio) (`git clone https://github.com/dahuilangda/V-Bio.git`), with six modes (score, pose, refine, interface, dock, peptide).
+> This `main` branch carries the pipeline exactly as published (BO fitness = ProteinMPNN NLL).
+
+> **Also recommended: v3 in [V-Bio](https://github.com/dahuilangda/V-Bio), which runs the whole design on protenix2dock.**
+> v3 replaces Chroma and ProteinMPNN with reinforcement learning: an ESM3 language model conditioned on the receptor proposes the candidates, Protenix scores them, GRPO updates the policy, and each candidate is a conformer the engine predicts and refines itself.
+> D-peptide design still runs in mirror space, so the engine needs no special handling for D residues.
+> It is available as V-Bio's `peptide_design` workflow (web UI, or `POST /predict` with `workflow=peptide_design`, `backend=protenix2dock`, `peptideChirality=d`).
 
 ## Publication
 
